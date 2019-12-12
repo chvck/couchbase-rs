@@ -1,2 +1,18 @@
-[workspace]
-members = ["couchbase", "couchbase-sys"]
+[package]
+name = "couchbase"
+version = "2.0.0-alpha.1"
+authors = ["Michael Nitschinger <michael@nitschinger.at>"]
+edition = "2018"
+license = "Apache-2.0"
+keywords = ["couchbase", "database", "libcouchbase"]
+categories = ["database", "asynchronous"]
+description = "The official Couchbase Rust SDK."
+repository = "https://github.com/couchbaselabs/couchbase-rs"
+homepage = "https://github.com/couchbaselabs/couchbase-rs"
+documentation = "https://docs.rs/couchbase"
+
+[dependencies]
+tokio = { version = "0.2", features = ["full"] }
+bytes = "0.5"
+futures = "0.3"
+hyper = "0.13"
