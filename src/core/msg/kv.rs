@@ -3,21 +3,22 @@ use bytes::Bytes;
 use futures::channel::oneshot::Sender;
 use std::borrow::Cow;
 
-pub struct GetRequest {
-    id: String,
+#[derive(Debug)]
+pub struct GetRequest<'a> {
+    id: Cow<'a, str>,
     sender: Option<Sender<GetResponse>>,
 }
 
-impl GetRequest {
-    pub fn new(sender: Sender<GetResponse>, id: String) -> Self {
+impl<'a> GetRequest<'a> {
+    pub fn new<S: Into<Cow<'a, str>>>(sender: Sender<GetResponse>, id: S) -> Self {
         Self {
             sender: Some(sender),
-            id,
+            id: id.into(),
         }
     }
 }
 
-impl Request for GetRequest {
+impl<'a> Request for GetRequest<'a> {
     type Item = GetResponse;
 
     fn encode(&self) -> Bytes {
@@ -37,6 +38,7 @@ impl Request for GetRequest {
     }
 }
 
+#[derive(Debug)]
 pub struct GetResponse {
     cas: u64,
     content: Bytes,

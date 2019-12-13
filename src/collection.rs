@@ -5,6 +5,7 @@ use crate::kv::{GetOptions, GetResult};
 use std::future::Future;
 use std::rc::Rc;
 use bytes::Bytes;
+use std::borrow::Cow;
 
 pub struct Collection {
     core: Rc<Core>,
@@ -15,7 +16,7 @@ impl Collection {
         Self { core }
     }
 
-    pub async fn get<S: Into<String>>(&self, id: S, options: Option<GetOptions>) -> GetResult {
+    pub async fn get<'a, S: Into<Cow<'a, str>>>(&self, id: S, options: Option<GetOptions>) -> GetResult {
         let (sender, receiver) = futures::channel::oneshot::channel();
         let request = GetRequest::new(sender, id.into());
         self.core.send(request);

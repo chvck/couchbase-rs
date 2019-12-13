@@ -8,6 +8,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let collection = bucket.default_collection();
 
     println!("{:?}", collection.get("foo", None).await);
+    println!("{:?}", collection.get(String::from("bar"), None).await);
 
     Ok(())
 }
