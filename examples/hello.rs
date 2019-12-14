@@ -5,10 +5,9 @@ use couchbase::Cluster;
 pub async fn main() -> Result<(), Box<dyn Error>> {
     let cluster = Cluster::connect("127.0.0.1");
     let bucket = cluster.bucket("travel-sample");
-    let collection = bucket.default_collection();
+    let _collection = bucket.default_collection();
 
-    println!("{:?}", collection.get("foo", None).await);
-    println!("{:?}", collection.get(String::from("bar"), None).await);
+    println!("{:?}", cluster.query("select 1=1", None).await);
 
     Ok(())
 }

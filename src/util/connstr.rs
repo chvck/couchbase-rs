@@ -1,9 +1,7 @@
-pub struct ConnectionString {
-
-}
+pub struct ConnectionString {}
 
 impl ConnectionString {
-    pub fn new(connstr: &str) -> Self {
+    pub fn new(_connstr: &str) -> Self {
         Self {}
     }
 }
@@ -16,6 +14,6 @@ impl From<String> for ConnectionString {
 
 impl From<&str> for ConnectionString {
     fn from(connstr: &str) -> Self {
-       ConnectionString::new(connstr)
+        ConnectionString::new(connstr)
     }
 }

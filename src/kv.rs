@@ -28,4 +28,23 @@ impl GetResult {
     }
 }
 
-pub struct GetOptions {}
+pub struct GetOptions {
+    pub(crate) timeout: Option<Duration>,
+}
+
+impl GetOptions {
+    fn new() -> Self {
+        Self { timeout: None }
+    }
+
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
+impl Default for GetOptions {
+    fn default() -> Self {
+        GetOptions::new()
+    }
+}

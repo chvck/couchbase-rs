@@ -1,16 +1,16 @@
 use crate::core::msg::{Request, Response};
+use crate::core::ServiceType;
 use bytes::Bytes;
-use futures::channel::oneshot::Sender;
-use std::borrow::Cow;
+use tokio::sync::oneshot::Sender;
 
 #[derive(Debug)]
-pub struct GetRequest<'a> {
-    id: Cow<'a, str>,
+pub struct GetRequest {
+    id: String,
     sender: Option<Sender<GetResponse>>,
 }
 
-impl<'a> GetRequest<'a> {
-    pub fn new<S: Into<Cow<'a, str>>>(sender: Sender<GetResponse>, id: S) -> Self {
+impl GetRequest {
+    pub fn new<S: Into<String>>(sender: Sender<GetResponse>, id: S) -> Self {
         Self {
             sender: Some(sender),
             id: id.into(),
@@ -18,7 +18,7 @@ impl<'a> GetRequest<'a> {
     }
 }
 
-impl<'a> Request for GetRequest<'a> {
+impl Request for GetRequest {
     type Item = GetResponse;
 
     fn encode(&self) -> Bytes {
@@ -26,15 +26,16 @@ impl<'a> Request for GetRequest<'a> {
     }
 
     fn decode(&self, input: Bytes) -> Self::Item {
-        GetResponse {
-            cas: 1234,
-            content: input,
-        }
+        GetResponse::new(1234, input)
     }
 
     fn succeed(&mut self, response: Self::Item) {
-        let mut sender = self.sender.take().unwrap();
-        sender.send(response);
+        let sender = self.sender.take().unwrap();
+        sender.send(response).expect("Could not send! - fix me.");
+    }
+
+    fn service_type(&self) -> ServiceType {
+        ServiceType::Kv
     }
 }
 

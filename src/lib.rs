@@ -3,7 +3,7 @@ mod cluster;
 mod collection;
 mod core;
 mod error;
-mod kv;
+pub mod kv;
 mod query;
 mod util;
 
