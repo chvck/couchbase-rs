@@ -1,7 +1,7 @@
 use crate::core::ServiceType;
 use http::request::Builder as HttpRequestBuilder;
 
-pub trait Authenticator {
+pub trait Authenticator: Send + Sync {
     fn auth_http_request(
         &self,
         service: ServiceType,
