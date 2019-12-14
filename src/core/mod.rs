@@ -1,4 +1,5 @@
 pub mod msg;
+pub mod auth;
 
 use crate::core::msg::Request;
 use crate::util::ConnectionString;
