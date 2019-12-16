@@ -4,8 +4,8 @@ use crate::error::{CouchbaseError, ErrorContext, Result};
 use crate::kv::{GetOptions, GetResult};
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::time;
+use crate::core::msg::Request;
 
 pub struct Collection {
     core: Arc<Core>,
@@ -22,11 +22,11 @@ impl Collection {
         options: Option<GetOptions>,
     ) -> Result<GetResult> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let request = GetRequest::new(sender, id.into());
+        let request = Request::Get(GetRequest::new(sender, id.into()));
 
         let user_timeout = options
             .and_then(|o| o.timeout)
-            .unwrap_or(Duration::from_secs(2));
+            .unwrap_or_else(|| self.core.config().timeout_config().kv_timeout().clone());
         let timeout = time::timeout(user_timeout, receiver);
 
         self.core.send(request);

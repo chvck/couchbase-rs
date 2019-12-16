@@ -1,6 +1,6 @@
-use crate::core::msg::{Request, Response};
-use crate::core::ServiceType;
 use bytes::Bytes;
+use http::request::Builder;
+use hyper::Body;
 use tokio::sync::oneshot::Sender;
 
 #[derive(Debug)]
@@ -16,26 +16,23 @@ impl QueryRequest {
             statement: statement.into(),
         }
     }
-}
 
-impl Request for QueryRequest {
-    type Item = QueryResponse;
-
-    fn encode(&self) -> Bytes {
-        unimplemented!()
-    }
-
-    fn decode(&self, input: Bytes) -> Self::Item {
+    pub fn decode(&self, input: Bytes) -> QueryResponse {
         QueryResponse::new(input)
     }
 
-    fn succeed(&mut self, response: Self::Item) {
+    pub fn succeed(&mut self, response: QueryResponse) {
         let sender = self.sender.take().unwrap();
         sender.send(response).expect("Could not send! - fix me.");
     }
 
-    fn service_type(&self) -> ServiceType {
-        ServiceType::Query
+    pub fn encode(&self, hostname: &str, port: usize, request: Builder) -> http::Request<Body> {
+        request
+            .method("POST")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .uri(&format!("http://{}:{}/query/service", hostname, port))
+            .body(Body::from(r#"{"statement": "select 1=1"}"#))
+            .unwrap()
     }
 }
 
@@ -49,5 +46,3 @@ impl QueryResponse {
         Self { content }
     }
 }
-
-impl Response for QueryResponse {}

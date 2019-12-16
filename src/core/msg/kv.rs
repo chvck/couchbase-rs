@@ -1,5 +1,3 @@
-use crate::core::msg::{Request, Response};
-use crate::core::ServiceType;
 use bytes::Bytes;
 use tokio::sync::oneshot::Sender;
 
@@ -16,14 +14,8 @@ impl GetRequest {
             id: id.into(),
         }
     }
-}
 
-impl Request for GetRequest {
-    type Item = GetResponse;
-
-    fn encode(&self) -> Bytes {
-        unimplemented!()
-    }
+    /* type Item = GetResponse;
 
     fn decode(&self, input: Bytes) -> Self::Item {
         GetResponse::new(1234, input)
@@ -32,11 +24,7 @@ impl Request for GetRequest {
     fn succeed(&mut self, response: Self::Item) {
         let sender = self.sender.take().unwrap();
         sender.send(response).expect("Could not send! - fix me.");
-    }
-
-    fn service_type(&self) -> ServiceType {
-        ServiceType::Kv
-    }
+    }*/
 }
 
 #[derive(Debug)]
@@ -58,5 +46,3 @@ impl GetResponse {
         &self.content
     }
 }
-
-impl Response for GetResponse {}

@@ -1,19 +1,22 @@
 pub mod kv;
 pub mod query;
 
+use crate::core::msg::kv::GetRequest;
+use crate::core::msg::query::QueryRequest;
 use crate::core::ServiceType;
-use bytes::Bytes;
+use std::fmt::Debug;
 
-pub trait Request {
-    type Item;
-
-    fn encode(&self) -> Bytes;
-
-    fn decode(&self, input: Bytes) -> Self::Item;
-
-    fn succeed(&mut self, response: Self::Item);
-
-    fn service_type(&self) -> ServiceType;
+#[derive(Debug)]
+pub enum Request {
+    Query(QueryRequest),
+    Get(GetRequest),
 }
 
-pub trait Response {}
+impl Request {
+    pub fn service_type(&self) -> ServiceType {
+        match self {
+            Self::Query(_) => ServiceType::Query,
+            Self::Get(_) => ServiceType::Kv,
+        }
+    }
+}
