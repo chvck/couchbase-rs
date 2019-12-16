@@ -1,14 +1,14 @@
 use crate::collection::Collection;
 use crate::core::Core;
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct Bucket {
     _name: String,
-    core: Rc<Core>,
+    core: Arc<Core>,
 }
 
 impl Bucket {
-    pub(crate) fn new(name: String, core: Rc<Core>) -> Self {
+    pub(crate) fn new(name: String, core: Arc<Core>) -> Self {
         Self { _name: name, core }
     }
 

@@ -1,26 +1,32 @@
 use crate::core::msg::kv::GetRequest;
 use crate::core::Core;
+use crate::error::{CouchbaseError, ErrorContext, Result};
 use crate::kv::{GetOptions, GetResult};
-use std::rc::Rc;
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
-use crate::error::{Result, CouchbaseError, ErrorContext};
 
 pub struct Collection {
-    core: Rc<Core>,
+    core: Arc<Core>,
 }
 
 impl Collection {
-    pub(crate) fn new(core: Rc<Core>) -> Self {
+    pub(crate) fn new(core: Arc<Core>) -> Self {
         Self { core }
     }
 
-    pub async fn get<'a, S: Into<Cow<'a, str>>>(&self, id: S, options: Option<GetOptions>) -> Result<GetResult> {
+    pub async fn get<'a, S: Into<Cow<'a, str>>>(
+        &self,
+        id: S,
+        options: Option<GetOptions>,
+    ) -> Result<GetResult> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let request = GetRequest::new(sender, id.into());
 
-        let user_timeout = options.and_then(|o| o.timeout).unwrap_or( Duration::from_secs(2));
+        let user_timeout = options
+            .and_then(|o| o.timeout)
+            .unwrap_or(Duration::from_secs(2));
         let timeout = time::timeout(user_timeout, receiver);
 
         self.core.send(request);
@@ -28,9 +34,13 @@ impl Collection {
         match timeout.await {
             Ok(f) => match f {
                 Ok(r) => Ok(GetResult::new(r.cas(), 0, r.content().clone(), None)),
-                Err(_e) => Err(CouchbaseError::Unexpected { ctx: ErrorContext::from_message("Sender dropped") })
+                Err(_e) => Err(CouchbaseError::Unexpected {
+                    ctx: ErrorContext::from_message("Sender dropped"),
+                }),
             },
-            Err(_) => Err(CouchbaseError::RequestTimeout { ctx: ErrorContext::empty() })
+            Err(_) => Err(CouchbaseError::RequestTimeout {
+                ctx: ErrorContext::empty(),
+            }),
         }
     }
 }

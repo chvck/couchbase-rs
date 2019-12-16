@@ -42,7 +42,7 @@ impl Display for ErrorContext {
         write!(
             f,
             "{}",
-            serde_json::to_string(&self.inner).unwrap_or("".into())
+            serde_json::to_string(&self.inner).unwrap_or_else(|_| "".into())
         )
     }
 }
