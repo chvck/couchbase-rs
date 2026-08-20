@@ -16,17 +16,17 @@
  *
  */
 
-use hmac::digest::{Digest, KeyInit};
-use hmac::Mac;
-use tokio::time::Instant;
+use hmac::Hmac;
+use sha1::Sha1;
+use sha2::{Sha256, Sha512};
 
 use crate::memdx::auth_mechanism::AuthMechanism;
 use crate::memdx::dispatcher::Dispatcher;
 use crate::memdx::error::Error;
 use crate::memdx::error::Result;
 use crate::memdx::op_auth_saslplain::OpSASLPlainEncoder;
-use crate::memdx::pendingop::{run_op_future_with_deadline, StandardPendingOp};
-use crate::memdx::request::{SASLAuthRequest, SASLStepRequest};
+use crate::memdx::pendingop::StandardPendingOp;
+use crate::memdx::request::SASLStepRequest;
 use crate::memdx::response::SASLStepResponse;
 use crate::scram::Client;
 
@@ -40,69 +40,52 @@ pub trait OpSASLScramEncoder: OpSASLPlainEncoder {
         D: Dispatcher;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct SASLAuthScramOptions {
-    deadline: Instant,
+/// A SCRAM client bound to one of the hashes the mechanism can negotiate.
+///
+/// A SCRAM exchange spans two round trips, so the client has to be carried from the one
+/// that sends the client-first message to the one that answers the server's challenge.
+/// Holding the hash as an enum keeps `Client`'s digest type parameters from leaking into
+/// everything that carries it.
+pub(crate) enum ScramClient {
+    Sha1(Client<Hmac<Sha1>, Sha1>),
+    Sha256(Client<Hmac<Sha256>, Sha256>),
+    Sha512(Client<Hmac<Sha512>, Sha512>),
 }
 
-impl SASLAuthScramOptions {
-    pub fn new(deadline: Instant) -> Self {
-        Self { deadline }
+impl ScramClient {
+    /// `None` when `mech` is not one of the SCRAM mechanisms.
+    pub(crate) fn new(mech: &AuthMechanism, username: &str, password: &str) -> Option<Self> {
+        let user = username.to_string();
+        let pass = password.to_string();
+
+        match mech {
+            AuthMechanism::ScramSha1 => Some(ScramClient::Sha1(Client::new(user, pass, None))),
+            AuthMechanism::ScramSha256 => Some(ScramClient::Sha256(Client::new(user, pass, None))),
+            AuthMechanism::ScramSha512 => Some(ScramClient::Sha512(Client::new(user, pass, None))),
+            _ => None,
+        }
     }
-}
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct OpsSASLAuthScram {}
-
-impl OpsSASLAuthScram {
-    pub async fn sasl_auth_scram<E, D, Di, H>(
-        &self,
-        encoder: &E,
-        dispatcher: &D,
-        mut client: Client<Di, H>,
-        opts: SASLAuthScramOptions,
-    ) -> Result<()>
-    where
-        E: OpSASLScramEncoder,
-        D: Dispatcher,
-        Di: Mac + KeyInit,
-        H: Digest,
-    {
-        // Perform the initial SASL step
-        let payload = client.step1().map_err(|e| {
-            Error::new_protocol_error("failed to perform initial sasl step").with(e)
-        })?;
-
-        let req = SASLAuthRequest {
-            payload,
-            auth_mechanism: AuthMechanism::ScramSha512,
+    /// The client-first message.
+    pub(crate) fn client_first(&mut self) -> Result<Vec<u8>> {
+        let payload = match self {
+            ScramClient::Sha1(client) => client.step1(),
+            ScramClient::Sha256(client) => client.step1(),
+            ScramClient::Sha512(client) => client.step1(),
         };
 
-        let resp =
-            run_op_future_with_deadline(opts.deadline, encoder.sasl_auth(dispatcher, req)).await?;
+        payload
+            .map_err(|e| Error::new_protocol_error("failed to perform initial sasl step").with(e))
+    }
 
-        if !resp.needs_more_steps {
-            return Ok(());
-        }
-
-        let payload = client
-            .step2(&resp.payload)
-            .map_err(|e| Error::new_protocol_error("failed to perform second sasl step").with(e))?;
-
-        let req = SASLStepRequest {
-            payload,
-            auth_mechanism: AuthMechanism::ScramSha512,
+    /// The client-final message, answering the server-first message in `challenge`.
+    pub(crate) fn client_final(&mut self, challenge: &[u8]) -> Result<Vec<u8>> {
+        let payload = match self {
+            ScramClient::Sha1(client) => client.step2(challenge),
+            ScramClient::Sha256(client) => client.step2(challenge),
+            ScramClient::Sha512(client) => client.step2(challenge),
         };
 
-        let resp =
-            run_op_future_with_deadline(opts.deadline, encoder.sasl_step(dispatcher, req)).await?;
-
-        if resp.needs_more_steps {
-            return Err(Error::new_protocol_error(
-                "server did not accept auth when the client expected",
-            ));
-        }
-
-        Ok(())
+        payload.map_err(|e| Error::new_protocol_error("failed to perform second sasl step").with(e))
     }
 }

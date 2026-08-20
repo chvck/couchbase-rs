@@ -48,17 +48,17 @@ fn upsert() {
         let upsert_opts = UpsertOptions::new(key_clone.as_slice(), "", "", value_clone.as_slice())
             .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            13
+            12
         } else {
-            11
+            10
         };
 
         ensure_agent_ready(&agent).await;
 
         create_doc(key, value, "", &agent).await;
 
-        run_allocation_test(agent, expected_allocs, async |agent| {
-            agent.upsert(upsert_opts).await.unwrap();
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, _run| {
+            agent.upsert(upsert_opts.clone()).await.unwrap();
         })
         .await
     });
@@ -96,17 +96,17 @@ fn upsert_against_new_collection() {
         .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
 
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            15
+            14
         } else {
-            13
+            12
         };
 
         ensure_agent_ready(&agent).await;
 
         create_doc(key, value, &collection_name, &agent).await;
 
-        run_allocation_test(agent, expected_allocs, async |agent| {
-            agent.upsert(upsert_opts).await.unwrap();
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, _run| {
+            agent.upsert(upsert_opts.clone()).await.unwrap();
         })
         .await
     });
@@ -117,23 +117,25 @@ fn upsert_against_new_collection() {
 #[test]
 fn add() {
     run_test(async |mut agent| {
-        let key = generate_key();
+        let keys: Vec<Vec<u8>> = (0..WARMUP_RUNS + MEASURED_RUNS)
+            .map(|_| generate_key())
+            .collect();
         let value = generate_bytes_value(32);
-        let key_clone = key.clone();
-        let value_clone = value.clone();
+        let strategy: Arc<dyn couchbase_core::retry::RetryStrategy> =
+            Arc::new(FailFastRetryStrategy::default());
 
-        let add_opts = AddOptions::new(key_clone.as_slice(), "", "", value_clone.as_slice())
-            .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            13
+            12
         } else {
-            11
+            10
         };
 
         ensure_agent_ready(&agent).await;
 
-        run_allocation_test(agent, expected_allocs, async |agent| {
-            agent.add(add_opts).await.unwrap();
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, run| {
+            let opts = AddOptions::new(keys[run].as_slice(), "", "", value.as_slice())
+                .retry_strategy(strategy.clone());
+            agent.add(opts).await.unwrap();
         })
         .await
     });
@@ -152,17 +154,17 @@ fn replace() {
         let opts = ReplaceOptions::new(key_clone.as_slice(), "", "", value_clone.as_slice())
             .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            13
+            12
         } else {
-            11
+            10
         };
 
         ensure_agent_ready(&agent).await;
 
         create_doc(key, value, "", &agent).await;
 
-        run_allocation_test(agent, expected_allocs, async |agent| {
-            agent.replace(opts).await.unwrap();
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, _run| {
+            agent.replace(opts.clone()).await.unwrap();
         })
         .await
     });
@@ -181,17 +183,17 @@ fn get() {
             .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
 
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            14
+            13
         } else {
-            12
+            11
         };
 
         ensure_agent_ready(&agent).await;
 
         create_doc(key, value, "", &agent).await;
 
-        run_allocation_test(agent, expected_allocs, async |agent| {
-            agent.get(opts).await.unwrap();
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, _run| {
+            agent.get(opts.clone()).await.unwrap();
         })
         .await
     });
@@ -214,27 +216,57 @@ async fn create_doc(key: Vec<u8>, value: Vec<u8>, collection: &str, agent: &Test
     agent.upsert(upsert_opts.clone()).await.unwrap();
 }
 
+/// Warm-up runs, excluded from the measurement.
+///
+/// The first operation against a collection resolves it against the manifest
+/// and caches the result; the first against a node grows the pool. Counting
+/// either would measure setup, not the per-operation cost this pins.
 #[cfg(feature = "dhat-heap")]
-async fn run_allocation_test<Fn, F>(agent: TestAgent, expected_allocs: u64, fut: Fn)
+const WARMUP_RUNS: usize = 100;
+
+/// Measured runs. The budget is compared against the *minimum* of these — the
+/// cleanest run is the one where no unrelated background work landed inside
+/// the window.
+#[cfg(feature = "dhat-heap")]
+const MEASURED_RUNS: usize = 200;
+
+/// Runs `op` against a warmed agent and pins its allocation count.
+///
+/// **The comparison is exact, not a ceiling.** Lowering `expected_allocs` is a
+/// change to the assertion, not a failure: an improvement reports here rather
+/// than passing silently and letting the budget rot upward later.
+#[cfg(feature = "dhat-heap")]
+async fn run_allocation_test<Op>(agent: TestAgent, expected_allocs: u64, op: Op)
 where
-    Fn: FnOnce(TestAgent) -> F,
-    F: Future<Output = ()>,
+    Op: AsyncFn(&TestAgent, usize),
 {
+    for run in 0..WARMUP_RUNS {
+        op(&agent, run).await;
+    }
+
     let profiler = dhat::Profiler::builder().testing().build();
 
-    let stats1 = dhat::HeapStats::get();
+    let mut min = u64::MAX;
+    let mut worst = 0u64;
+    for run in 0..MEASURED_RUNS {
+        let before = dhat::HeapStats::get().total_blocks;
+        op(&agent, WARMUP_RUNS + run).await;
+        let delta = dhat::HeapStats::get().total_blocks - before;
+        min = min.min(delta);
+        worst = worst.max(delta);
+    }
 
-    fut(agent).await;
+    eprintln!("  {min} allocations on the cleanest of {MEASURED_RUNS} runs (worst {worst})");
 
-    let stats2 = dhat::HeapStats::get();
-
-    let total_allocs = stats2.total_blocks - stats1.total_blocks;
-
-    dhat::assert!(
-        total_allocs <= expected_allocs,
-        "Expected max {} allocations, was {}",
+    dhat::assert_eq!(
+        min,
         expected_allocs,
-        total_allocs
+        "the operation allocated {} times, not {}. If this is a deliberate \
+         improvement, lower the expected count; if it is a regression, \
+         something on the request or response path started allocating per \
+         operation.",
+        min,
+        expected_allocs
     );
 
     drop(profiler);

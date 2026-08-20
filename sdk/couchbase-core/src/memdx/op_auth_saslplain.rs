@@ -57,6 +57,17 @@ impl SASLAuthPlainOptions {
 pub struct OpsSASLAuthPlain {}
 
 impl OpsSASLAuthPlain {
+    /// The PLAIN payload: an empty authzid, the username and the password, NUL separated.
+    pub(crate) fn payload(username: &str, password: &str) -> Vec<u8> {
+        let mut payload: Vec<u8> = Vec::with_capacity(username.len() + password.len() + 2);
+        payload.push(0);
+        payload.extend_from_slice(username.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(password.as_bytes());
+
+        payload
+    }
+
     pub async fn sasl_auth_plain<E, D>(
         &self,
         encoder: &E,
@@ -67,14 +78,8 @@ impl OpsSASLAuthPlain {
         E: OpSASLPlainEncoder,
         D: Dispatcher,
     {
-        let mut payload: Vec<u8> = Vec::new();
-        payload.push(0);
-        payload.extend_from_slice(opts.username.as_ref());
-        payload.push(0);
-        payload.extend_from_slice(opts.password.as_ref());
-
         let req = SASLAuthRequest {
-            payload,
+            payload: Self::payload(&opts.username, &opts.password),
             auth_mechanism: AuthMechanism::Plain,
         };
 

@@ -24,8 +24,8 @@ use crate::memdx::error::Result;
 use crate::memdx::packet::{RequestPacket, ResponsePacket};
 use crate::memdx::pendingop::ClientPendingOp;
 use crate::orphan_reporter::OrphanContext;
-use async_trait::async_trait;
 use futures::future::BoxFuture;
+use std::future::Future;
 use tokio::sync::oneshot;
 
 pub type UnsolicitedPacketHandler =
@@ -41,14 +41,20 @@ pub struct DispatcherOptions {
     pub id: String,
 }
 
-#[async_trait]
+/// The write side of a memcached connection.
+///
+/// This is never used as `dyn Dispatcher` -- `fn new(..) -> Self` would not allow it, and
+/// every caller is generic over the implementation -- so the futures are returned as opaque
+/// types rather than boxed. That saves one allocation on every operation the SDK performs.
 pub trait Dispatcher: Send + Sync {
     fn new(conn: ConnectionType, opts: DispatcherOptions) -> Self;
-    async fn dispatch<'a>(
+
+    fn dispatch<'a>(
         &self,
         packet: RequestPacket<'a>,
         is_persistent: bool,
         response_context: Option<ResponseContext>,
-    ) -> Result<ClientPendingOp>;
-    async fn close(&self) -> Result<()>;
+    ) -> impl Future<Output = Result<ClientPendingOp>> + Send;
+
+    fn close(&self) -> impl Future<Output = Result<()>> + Send;
 }

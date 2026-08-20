@@ -112,7 +112,9 @@ impl TcpConnection {
         socket2::SockRef::from(&tcp_socket)
             .set_tcp_keepalive(&TcpKeepalive::new().with_time(opts.tcp_keep_alive_time))?;
 
-        tcp_socket.set_nodelay(false).map_err(|e| {
+        // KV is a request/response protocol over small packets: Nagle would hold a
+        // request back waiting for an ACK that only the next request will trigger.
+        tcp_socket.set_nodelay(true).map_err(|e| {
             Error::new_connection_failed_error("failed to set tcp nodelay", Box::new(e))
         })?;
 

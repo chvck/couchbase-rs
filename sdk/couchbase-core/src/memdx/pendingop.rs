@@ -136,18 +136,33 @@ impl<T: TryFromClientResponse> StandardPendingOp<T> {
     }
 }
 
-pub(super) async fn run_op_future_with_deadline<F, T>(deadline: Instant, fut: F) -> Result<T>
+/// Write an operation's request, giving up if it is not on the wire by `deadline`.
+///
+/// The response is deliberately left unread. On a request/response protocol that is the
+/// whole difference between a batch of operations costing one round trip and costing one
+/// each: the caller can keep dispatching while the replies are still in the air.
+pub(super) async fn dispatch_op_with_deadline<F, T>(
+    deadline: Instant,
+    fut: F,
+) -> Result<StandardPendingOp<T>>
 where
     F: Future<Output = Result<StandardPendingOp<T>>>,
     T: TryFromClientResponse,
 {
-    let mut op = match timeout_at(deadline, fut).await {
-        Ok(op) => op?,
-        Err(_e) => {
-            return Err(Error::new_cancelled_error(CancellationErrorKind::Timeout));
-        }
-    };
+    match timeout_at(deadline, fut).await {
+        Ok(op) => op,
+        Err(_e) => Err(Error::new_cancelled_error(CancellationErrorKind::Timeout)),
+    }
+}
 
+/// Read a dispatched operation's response, cancelling it if `deadline` passes.
+pub(super) async fn recv_op_with_deadline<T>(
+    deadline: Instant,
+    mut op: StandardPendingOp<T>,
+) -> Result<T>
+where
+    T: TryFromClientResponse,
+{
     match timeout_at(deadline, op.recv()).await {
         Ok(res) => res,
         Err(_e) => {
@@ -158,4 +173,26 @@ where
             op.recv().await
         }
     }
+}
+
+/// Read a dispatched operation's response and throw it away.
+///
+/// Dropping a dispatched op instead unregisters its opaque, so the reply that is already
+/// on its way back arrives with nowhere to go and is logged as an orphan. Any path that
+/// abandons an operation it has already written has to come through here.
+pub(super) async fn discard_op_with_deadline<T>(deadline: Instant, op: StandardPendingOp<T>)
+where
+    T: TryFromClientResponse,
+{
+    let _ = recv_op_with_deadline(deadline, op).await;
+}
+
+pub(super) async fn run_op_future_with_deadline<F, T>(deadline: Instant, fut: F) -> Result<T>
+where
+    F: Future<Output = Result<StandardPendingOp<T>>>,
+    T: TryFromClientResponse,
+{
+    let op = dispatch_op_with_deadline(deadline, fut).await?;
+
+    recv_op_with_deadline(deadline, op).await
 }

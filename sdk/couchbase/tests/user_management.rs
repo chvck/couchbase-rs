@@ -16,6 +16,11 @@
  *
  */
 
+// Each test binary is its own crate, so it needs the raised limit the library carries: the
+// KV futures are no longer boxed, and the helpers that drive a sequence of operations build
+// state machines deeper than rustc's default layout query depth.
+#![recursion_limit = "256"]
+
 use crate::common::features::TestFeatureCode;
 use crate::common::test_config::run_test;
 use crate::common::test_manager::TestUserManager;

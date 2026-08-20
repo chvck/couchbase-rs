@@ -246,6 +246,15 @@
 //! Note that the SDK does not typically use feature flags for API stability levels.
 //! Instead, unstable features are commented with **uncommitted** or **volatile**.
 
+// couchbase-core's memdx dispatcher returns its futures unboxed, and the boxing used to
+// cap how deep rustc had to walk to lay one out. The data-structure helpers in
+// collection_ds stack several layers of async on top of a single KV operation, which is
+// enough to push that walk past the default limit.
+#![recursion_limit = "256"]
+// Each doctest compiles as its own crate, so the attribute above does not reach
+// them and the examples that await a KV operation overflow the same limit.
+#![doc(test(attr(recursion_limit = "256")))]
+
 extern crate core;
 pub mod authenticator;
 pub mod bucket;

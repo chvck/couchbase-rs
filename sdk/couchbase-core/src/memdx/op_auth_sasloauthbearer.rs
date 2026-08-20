@@ -38,6 +38,20 @@ impl SASLOAuthBearerOptions {
 pub struct OpsSASLOAuthBearer {}
 
 impl OpsSASLOAuthBearer {
+    /// The OAUTHBEARER payload: an empty gs2 header, then the bearer token as the single
+    /// key/value pair of the message, each part terminated by SOH.
+    pub(crate) fn payload(token: &str) -> Vec<u8> {
+        let mut payload: Vec<u8> = Vec::with_capacity(token.len() + 18);
+        payload.extend_from_slice(b"n,,");
+        payload.push(1);
+        payload.extend_from_slice(b"auth=Bearer ");
+        payload.extend_from_slice(token.as_bytes());
+        payload.push(1);
+        payload.push(1);
+
+        payload
+    }
+
     pub async fn sasl_auth_oauth_bearer<E, D>(
         &self,
         encoder: &E,
@@ -48,16 +62,8 @@ impl OpsSASLOAuthBearer {
         E: OpSASLPlainEncoder,
         D: Dispatcher,
     {
-        let mut payload: Vec<u8> = Vec::new();
-        payload.extend_from_slice(b"n,,");
-        payload.push(1);
-        payload.extend_from_slice(b"auth=Bearer ");
-        payload.extend_from_slice(options.token.as_bytes());
-        payload.push(1);
-        payload.push(1);
-
         let req = SASLAuthRequest {
-            payload,
+            payload: Self::payload(&options.token),
             auth_mechanism: AuthMechanism::OAuthBearer,
         };
 

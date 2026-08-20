@@ -55,6 +55,10 @@ env_logger = "0.11.9"
 envconfig = "0.11.1"
 log = "0.4.29"
 serial_test = "3.4"
+# test-util is not part of tokio's "full", and the memdx pipelining tests need its paused
+# clock: it only advances when every task is parked, which is how they tell that the code
+# under test has stopped writing and is waiting to be answered.
+tokio = { version = "1.50", features = ["test-util"] }
 tracing-subscriber = "0.3.22"
 
 couchbase-connstr = { path = "../couchbase-connstr", version = "1.0.1" }

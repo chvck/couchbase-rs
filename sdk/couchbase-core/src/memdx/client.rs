@@ -16,7 +16,6 @@
  *
  */
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, TryFutureExt};
 use snap::raw::Decoder;
@@ -324,7 +323,6 @@ impl Drop for DispatchOpaqueGuard {
     }
 }
 
-#[async_trait]
 impl Dispatcher for Client {
     fn new(conn: ConnectionType, opts: DispatcherOptions) -> Self {
         let local_addr = *conn.local_addr();
