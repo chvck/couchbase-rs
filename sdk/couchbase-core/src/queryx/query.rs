@@ -351,6 +351,11 @@ impl<C: Client> Query<C> {
 
         qs.push_str(&format!(" ({})", opts.fields.join(",")));
 
+        // Before `WITH` and after the keys, which is where the grammar puts it.
+        if let Some(condition) = opts.condition {
+            qs.push_str(&format!(" WHERE {condition}"));
+        }
+
         let mut with: HashMap<&str, Value> = HashMap::new();
 
         if let Some(deferred) = opts.deferred {

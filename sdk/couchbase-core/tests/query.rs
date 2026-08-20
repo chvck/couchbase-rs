@@ -235,3 +235,67 @@ fn test_query_indexes() {
         );
     });
 }
+
+/// **A condition makes a partial index, and the server reports it back.**
+///
+/// Without one on the options a `CREATE INDEX` builds over every document, which
+/// is a *superset* of what a condition asks for rather than an error — so an
+/// options type that dropped it would build the wrong index and report success.
+/// That is why this reads the condition back rather than only asserting the
+/// create succeeded.
+#[test]
+
+fn a_condition_builds_a_partial_index_and_is_reported_back() {
+    run_test(async |mut agent| {
+        let bucket_name = agent.test_setup_config.bucket.clone();
+        let index_name = generate_string_key();
+        let index_name = index_name.as_str();
+
+        agent
+            .create_index(
+                &CreateIndexOptions::new(bucket_name.as_str(), index_name, &["`name`"])
+                    .condition("`name` is not missing")
+                    .ignore_if_exists(true)
+                    .deferred(true),
+            )
+            .await
+            .expect("a partial index should be creatable");
+
+        agent
+            .ensure_index(&EnsureIndexOptions::new(
+                index_name,
+                bucket_name.as_str(),
+                None,
+                None,
+                DesiredState::Created,
+            ))
+            .await
+            .unwrap();
+
+        let indexes = agent
+            .get_all_indexes(&GetAllIndexesOptions::new(bucket_name.as_str()))
+            .await
+            .unwrap();
+
+        let index = indexes
+            .iter()
+            .find(|i| i.name == index_name)
+            .expect("the index just created should be listed");
+
+        let condition = index
+            .condition
+            .as_deref()
+            .expect("a partial index reports the predicate it was built with");
+        assert!(
+            condition.contains("name"),
+            "the condition should name the field it filters on, got {condition:?}"
+        );
+
+        agent
+            .drop_index(
+                &DropIndexOptions::new(bucket_name.as_str(), index_name).ignore_if_not_exists(true),
+            )
+            .await
+            .unwrap();
+    });
+}

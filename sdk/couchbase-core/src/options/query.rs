@@ -634,6 +634,12 @@ pub struct CreateIndexOptions<'a> {
     pub index_name: &'a str,
     pub num_replicas: Option<u32>,
     pub fields: &'a [&'a str],
+    /// A predicate the index only holds entries for — a partial index.
+    ///
+    /// Absent builds an index over every document, which is a **superset** of
+    /// what a condition asks for rather than an error, so an option that
+    /// silently dropped it would build the wrong index and report success.
+    pub condition: Option<&'a str>,
     pub deferred: Option<bool>,
     pub ignore_if_exists: Option<bool>,
     pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
@@ -650,6 +656,7 @@ impl<'a> CreateIndexOptions<'a> {
             index_name,
             num_replicas: None,
             fields,
+            condition: None,
             deferred: None,
             ignore_if_exists: None,
             on_behalf_of: None,
@@ -675,6 +682,11 @@ impl<'a> CreateIndexOptions<'a> {
 
     pub fn deferred(mut self, deferred: bool) -> Self {
         self.deferred = Some(deferred);
+        self
+    }
+
+    pub fn condition(mut self, condition: impl Into<Option<&'a str>>) -> Self {
+        self.condition = condition.into();
         self
     }
 
@@ -708,6 +720,7 @@ impl<'a> From<&CreateIndexOptions<'a>> for queryx::query_options::CreateIndexOpt
             index_name: opts.index_name,
             num_replicas: opts.num_replicas,
             fields: opts.fields,
+            condition: opts.condition,
             deferred: opts.deferred,
             ignore_if_exists: opts.ignore_if_exists,
             on_behalf_of: opts.on_behalf_of,

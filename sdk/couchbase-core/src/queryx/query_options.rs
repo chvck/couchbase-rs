@@ -697,6 +697,7 @@ pub struct CreateIndexOptions<'a> {
     pub(crate) index_name: &'a str,
     pub(crate) num_replicas: Option<u32>,
     pub(crate) fields: &'a [&'a str],
+    pub(crate) condition: Option<&'a str>,
     pub(crate) deferred: Option<bool>,
     pub(crate) ignore_if_exists: Option<bool>,
     pub(crate) on_behalf_of: Option<&'a OnBehalfOfInfo>,
@@ -739,6 +740,11 @@ impl<'a> CreateIndexOptions<'a> {
 
     pub fn deferred(mut self, deferred: impl Into<Option<bool>>) -> Self {
         self.deferred = deferred.into();
+        self
+    }
+
+    pub fn condition(mut self, condition: impl Into<Option<&'a str>>) -> Self {
+        self.condition = condition.into();
         self
     }
 
