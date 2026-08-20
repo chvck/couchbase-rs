@@ -1545,6 +1545,66 @@ impl TryFromClientResponse for GetCollectionIdResponse {
     }
 }
 
+/// One entry of a `STAT` sweep, or the empty packet that ends it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatsResponse {
+    /// The stat's name. Empty on the packet that terminates the stream.
+    pub key: Bytes,
+    /// The stat's value. Empty on the packet that terminates the stream.
+    pub value: Bytes,
+    pub server_duration: Option<Duration>,
+}
+
+impl StatsResponse {
+    /// Whether this is the empty packet that ends the sweep.
+    ///
+    /// **This is the whole termination protocol.** `STAT` has no count and no
+    /// final status distinct from the entries': the server sends one packet per
+    /// stat and then one with neither a key nor a value.
+    pub fn is_end(&self) -> bool {
+        self.key.is_empty() && self.value.is_empty()
+    }
+}
+
+impl TryFromClientResponse for StatsResponse {
+    fn try_from(resp: ClientResponse) -> Result<Self, Error> {
+        let packet = resp.packet();
+
+        if packet.status != Status::Success {
+            return Err(OpsCore::decode_error(&packet));
+        }
+
+        let server_duration = match &packet.framing_extras {
+            Some(f) => decode_res_ext_frames(f)?,
+            None => None,
+        };
+
+        Ok(StatsResponse {
+            key: packet.key.unwrap_or_default(),
+            value: packet.value.unwrap_or_default(),
+            server_duration,
+        })
+    }
+}
+
+impl TraceAttributes for StatsResponse {
+    fn server_duration(&self) -> Option<Duration> {
+        self.server_duration
+    }
+}
+
+/// What a completed `STAT` sweep reports, once every entry has been delivered.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StatsActionResponse {
+    pub server_duration: Option<Duration>,
+}
+
+impl TraceAttributes for StatsActionResponse {
+    fn server_duration(&self) -> Option<Duration> {
+        self.server_duration
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PingResponse {}
 

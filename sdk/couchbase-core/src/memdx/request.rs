@@ -853,6 +853,33 @@ impl<'a> MutateInRequest<'a> {
     }
 }
 
+/// A `STAT` sweep of one node.
+///
+/// Answers with a **stream** of key/value packets terminated by an empty one, so
+/// it holds its connection for as long as the node takes to produce them --
+/// which is why it runs on the bulk connection manager.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct StatsRequest<'a> {
+    /// The stat group, or empty for the default set.
+    pub group_name: &'a str,
+    pub on_behalf_of: Option<&'a str>,
+}
+
+impl<'a> StatsRequest<'a> {
+    pub fn new(group_name: &'a str) -> Self {
+        Self {
+            group_name,
+            on_behalf_of: None,
+        }
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: &'a str) -> Self {
+        self.on_behalf_of = Some(on_behalf_of);
+        self
+    }
+}
+
 #[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PingRequest<'a> {
     pub(crate) on_behalf_of: Option<&'a str>,

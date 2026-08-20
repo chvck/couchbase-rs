@@ -41,6 +41,7 @@ use couchbase_core::options::crud::{
 use couchbase_core::options::rangescan::{
     RangeScanCancelOptions, RangeScanContinueOptions, RangeScanCreateOptions,
 };
+use couchbase_core::options::stats::{StatsByVbucketOptions, StatsOptions};
 use couchbase_core::options::waituntilready::WaitUntilReadyOptions;
 use couchbase_core::retrybesteffort::{BestEffortRetryStrategy, ExponentialBackoffCalculator};
 use couchbase_core::retryfailfast::FailFastRetryStrategy;
@@ -1252,6 +1253,133 @@ fn test_range_scan_uses_the_bulk_connection_manager() {
             err.to_string().contains("no connections configured"),
             "a range scan with no bulk connections failed with {err}, which is not \
              the bulk manager refusing it"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// STAT
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_stats_sweeps_every_node() {
+    run_test(async |agent| {
+        let mut entries = vec![];
+        let result = agent
+            .stats(StatsOptions::new(""), |entry| {
+                entries.push((
+                    entry.endpoint.to_string(),
+                    entry.key_str().into_owned(),
+                    entry.value_str().into_owned(),
+                ));
+            })
+            .await
+            .unwrap();
+
+        assert!(result.endpoints > 0, "no node answered the sweep");
+        assert_eq!(result.entries, entries.len());
+        assert!(
+            entries.len() > 20,
+            "the default stat group returned {} entries, which is not a group",
+            entries.len()
+        );
+
+        // Every entry is attributed, and nothing empty gets through: the empty
+        // packet is the terminator and must not reach the caller.
+        for (endpoint, key, _) in &entries {
+            assert!(!endpoint.is_empty());
+            assert!(!key.is_empty(), "an empty key reached the callback");
+        }
+
+        // A stat every kv_engine reports, so this is checking the sweep read the
+        // real listing rather than something that merely had the right shape.
+        assert!(
+            entries.iter().any(|(_, key, _)| key == "uptime"),
+            "the default group did not include uptime"
+        );
+
+        // Every node the manager knows about answered.
+        let distinct: std::collections::HashSet<&String> =
+            entries.iter().map(|(endpoint, _, _)| endpoint).collect();
+        assert_eq!(distinct.len(), result.endpoints);
+    });
+}
+
+#[test]
+fn test_stats_by_vbucket_reads_one_node() {
+    run_test(async |agent| {
+        let mut entries = 0usize;
+        let mut endpoints = std::collections::HashSet::new();
+
+        let result = agent
+            .stats_by_vbucket(StatsByVbucketOptions::new("vbucket-details", 0), |entry| {
+                entries += 1;
+                endpoints.insert(entry.endpoint.to_string());
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.endpoints, 1);
+        assert_eq!(result.entries, entries);
+        assert!(entries > 0, "vbucket-details returned nothing");
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "a per-vbucket sweep hit more than one node"
+        );
+    });
+}
+
+/// A `STAT` sweep goes to the bulk connection manager, like a range scan.
+///
+/// Proved the same way, by removal: with no bulk connections the sweep has
+/// nowhere to run while point operations are untouched. See
+/// `test_range_scan_uses_the_bulk_connection_manager`.
+#[test]
+fn test_stats_uses_the_bulk_connection_manager() {
+    setup_test(async |config| {
+        let mut agent_opts = create_default_options(config).await;
+        agent_opts.kv_config = KvConfig::new().num_bulk_connections(0);
+
+        let agent = Agent::new(agent_opts).await.unwrap();
+        agent
+            .wait_until_ready(&WaitUntilReadyOptions::new().service_types(vec![ServiceType::MEMD]))
+            .await
+            .unwrap();
+
+        let strat = Arc::new(FailFastRetryStrategy::default());
+        let key = generate_key();
+        let value = generate_bytes_value(32);
+        agent
+            .upsert(
+                UpsertOptions::new(key.as_slice(), "", "", value.as_slice())
+                    .retry_strategy(strat.clone()),
+            )
+            .await
+            .expect("a point operation should not go near the bulk manager");
+
+        let err = agent
+            .stats(StatsOptions::new("").retry_strategy(strat.clone()), |_| {
+                unreachable!("no node should have answered")
+            })
+            .await
+            .expect_err("a stats sweep with no bulk connections has nowhere to run");
+        assert!(
+            err.to_string().contains("no connections configured"),
+            "a stats sweep with no bulk connections failed with {err}, which is not \
+             the bulk manager refusing it"
+        );
+
+        let err = agent
+            .stats_by_vbucket(
+                StatsByVbucketOptions::new("", 0).retry_strategy(strat),
+                |_| unreachable!("no node should have answered"),
+            )
+            .await
+            .expect_err("a per-vbucket sweep with no bulk connections has nowhere to run");
+        assert!(
+            err.to_string().contains("no connections configured"),
+            "a per-vbucket sweep with no bulk connections failed with {err}"
         );
     });
 }

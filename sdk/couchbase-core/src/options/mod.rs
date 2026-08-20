@@ -28,4 +28,5 @@ pub mod query;
 pub mod rangescan;
 pub mod search;
 pub mod search_management;
+pub mod stats;
 pub mod waituntilready;

@@ -39,8 +39,8 @@ use crate::memdx::ops_rangescan::{
 use crate::memdx::request::{
     AddRequest, AppendRequest, DecrementRequest, DeleteRequest, GetAndLockRequest,
     GetAndTouchRequest, GetCollectionIdRequest, GetMetaRequest, GetRequest, IncrementRequest,
-    LookupInRequest, MutateInRequest, PrependRequest, ReplaceRequest, SetRequest, TouchRequest,
-    UnlockRequest,
+    LookupInRequest, MutateInRequest, PrependRequest, ReplaceRequest, SetRequest, StatsRequest,
+    TouchRequest, UnlockRequest,
 };
 use crate::memdx::response::{LookupInResponse, MutateInResponse};
 use crate::mutationtoken::MutationToken;
@@ -52,12 +52,14 @@ use crate::options::crud::{
     UpsertOptions,
 };
 use crate::options::rangescan::RangeScanCreateOptions;
+use crate::options::stats::{StatsByVbucketOptions, StatsOptions};
 use crate::results::kv::{
     AddResult, AppendResult, DecrementResult, DeleteResult, GetAndLockResult, GetAndTouchResult,
     GetCollectionIdResult, GetMetaResult, GetResult, IncrementResult, LookupInResult,
     MutateInResult, PrependResult, ReplaceResult, SubDocResult, TouchResult, UnlockResult,
     UpsertResult,
 };
+use crate::results::stats::{StatsEntry, StatsResult};
 use crate::retry::{
     error_to_retry_reason, orchestrate_retries, RetryManager, RetryRequest, RetryStrategy,
 };
@@ -997,6 +999,103 @@ impl<
                     },
                 )
                 .await
+            },
+        )
+        .await
+    }
+
+    /// Sweep `STAT` across every KV node.
+    ///
+    /// **On the bulk manager, by the response-count rule.** `STAT` answers with a
+    /// stream of packets terminated by an empty one, so like a range scan's
+    /// continue it holds its connection for as long as the answer takes. What it
+    /// is called does not come into it.
+    ///
+    /// The nodes are swept **one at a time**. In parallel the callback would need
+    /// a lock around it, and the sweep is administrative -- nothing on a hot path
+    /// waits for it.
+    pub(crate) async fn stats<F>(
+        &self,
+        opts: StatsOptions<'_>,
+        mut data_cb: F,
+    ) -> Result<StatsResult>
+    where
+        F: FnMut(StatsEntry) + Send,
+    {
+        let clients = self.bulk_conn_manager.get_client_per_endpoint().await?;
+
+        let mut result = StatsResult {
+            endpoints: clients.len(),
+            entries: 0,
+        };
+
+        for client in clients {
+            let endpoint: Arc<str> = Arc::from(client.canonical_addr().to_string());
+            let entries = &mut result.entries;
+            let cb = &mut data_cb;
+
+            client
+                .stats(StatsRequest::new(opts.group_name), |resp| {
+                    *entries += 1;
+                    cb(StatsEntry {
+                        endpoint: endpoint.clone(),
+                        key: resp.key,
+                        value: resp.value,
+                    });
+                })
+                .await
+                .map_err(Error::new_contextual_memdx_error)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Ask `STAT` of the node holding one vbucket. Also on the bulk manager.
+    ///
+    /// **No retry orchestration around the sweep**, unlike a point operation.
+    /// `STAT` hands entries to the caller as they arrive, so retrying a sweep
+    /// that has already delivered some would deliver them twice. The endpoint
+    /// orchestration below still retries a *dispatch* failure, which happens
+    /// before any entry exists, and a vbucket that has moved surfaces as an error
+    /// for the caller to reissue against the new topology.
+    pub(crate) async fn stats_by_vbucket<F>(
+        &self,
+        opts: StatsByVbucketOptions<'_>,
+        data_cb: F,
+    ) -> Result<StatsResult>
+    where
+        F: FnMut(StatsEntry) + Send,
+    {
+        // The orchestrator wants an `FnMut` operation, and a closure holding the
+        // caller's callback by unique reference is `FnOnce`. A mutex gives it
+        // back, and it is uncontended: the sweep is sequential.
+        let data_cb = std::sync::Mutex::new(data_cb);
+        let endpoint = self.router.dispatch_to_vbucket(opts.vbucket_id)?;
+
+        orchestrate_endpoint_kv_client(
+            self.bulk_conn_manager.clone(),
+            &endpoint,
+            async |client: Arc<KvClientManagerClientType<M>>| {
+                let node: Arc<str> = Arc::from(client.canonical_addr().to_string());
+                let mut entries = 0usize;
+
+                client
+                    .stats(StatsRequest::new(opts.group_name), |resp| {
+                        entries += 1;
+                        let mut cb = data_cb.lock().unwrap();
+                        (*cb)(StatsEntry {
+                            endpoint: node.clone(),
+                            key: resp.key,
+                            value: resp.value,
+                        });
+                    })
+                    .await
+                    .map_err(Error::new_contextual_memdx_error)?;
+
+                Ok(StatsResult {
+                    endpoints: 1,
+                    entries,
+                })
             },
         )
         .await

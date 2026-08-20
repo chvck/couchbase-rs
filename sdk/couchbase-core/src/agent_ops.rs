@@ -64,6 +64,7 @@ use crate::options::search_management::{
     FreezePlanOptions, GetIndexOptions, GetIndexedDocumentsCountOptions, PauseIngestOptions,
     ResumeIngestOptions, UnfreezePlanOptions, UpsertIndexOptions,
 };
+use crate::options::stats::{StatsByVbucketOptions, StatsOptions};
 use crate::options::waituntilready::WaitUntilReadyOptions;
 use crate::queryx::index::Index;
 use crate::results::analytics::AnalyticsResultStream;
@@ -77,6 +78,7 @@ use crate::results::pingreport::PingReport;
 use crate::results::query::QueryResultStream;
 use crate::results::rangescan::RangeScanCreateResult;
 use crate::results::search::SearchResultStream;
+use crate::results::stats::{StatsEntry, StatsResult};
 use crate::searchx;
 use crate::searchx::document_analysis::DocumentAnalysis;
 use serde_json::value::RawValue;
@@ -461,6 +463,32 @@ impl Agent {
             "range scan is not supported by this bucket",
         )
         .await
+    }
+
+    /// Sweep `STAT` across every KV node, calling `data_cb` once per stat.
+    ///
+    /// **A multi-response operation, so it runs on the bulk connection manager**
+    /// — the one range scans use. That is decided by how many responses `STAT`
+    /// gets, not by what it is called: a sweep holds its connection until the
+    /// node has finished listing, and a point operation queued behind it would
+    /// wait for the whole listing.
+    pub async fn stats<F>(&self, opts: StatsOptions<'_>, data_cb: F) -> Result<StatsResult>
+    where
+        F: FnMut(StatsEntry) + Send,
+    {
+        self.inner.crud.stats(opts, data_cb).await
+    }
+
+    /// Ask `STAT` of the node holding one vbucket. Also on the bulk manager.
+    pub async fn stats_by_vbucket<F>(
+        &self,
+        opts: StatsByVbucketOptions<'_>,
+        data_cb: F,
+    ) -> Result<StatsResult>
+    where
+        F: FnMut(StatsEntry) + Send,
+    {
+        self.inner.crud.stats_by_vbucket(opts, data_cb).await
     }
 
     pub async fn get_collection_id(

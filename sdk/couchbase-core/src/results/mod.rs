@@ -23,3 +23,4 @@ pub mod pingreport;
 pub mod query;
 pub mod rangescan;
 pub mod search;
+pub mod stats;

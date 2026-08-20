@@ -38,14 +38,14 @@ use crate::memdx::request::{
     AddRequest, AppendRequest, DecrementRequest, DeleteRequest, GetAndLockRequest,
     GetAndTouchRequest, GetClusterConfigRequest, GetCollectionIdRequest, GetMetaRequest,
     GetRequest, IncrementRequest, LookupInRequest, MutateInRequest, PingRequest, PrependRequest,
-    ReplaceRequest, SelectBucketRequest, SetRequest, TouchRequest, UnlockRequest,
+    ReplaceRequest, SelectBucketRequest, SetRequest, StatsRequest, TouchRequest, UnlockRequest,
 };
 use crate::memdx::response::{
     AddResponse, AppendResponse, BootstrapResult, DecrementResponse, DeleteResponse,
     GetAndLockResponse, GetAndTouchResponse, GetClusterConfigResponse, GetCollectionIdResponse,
     GetMetaResponse, GetResponse, IncrementResponse, LookupInResponse, MutateInResponse,
     PingResponse, PrependResponse, ReplaceResponse, SelectBucketResponse, SetResponse,
-    TouchResponse, TraceAttributes, UnlockResponse,
+    StatsActionResponse, StatsResponse, TouchResponse, TraceAttributes, UnlockResponse,
 };
 use crate::tracingcomponent::{BeginDispatchFields, EndDispatchFields, OperationId};
 use chrono::Utc;
@@ -141,6 +141,20 @@ pub(crate) trait KvClientOps: Sized + Send + Sync {
         &self,
         req: RangeScanCancelRequest,
     ) -> impl Future<Output = KvResult<RangeScanCancelResponse>> + Send;
+
+    /// Send one `STAT` and read every entry it answers with.
+    ///
+    /// A multi-response operation, like a range scan's continue: `data_cb` is
+    /// handed each entry as it arrives and the entries are slices of the packets
+    /// they came in, so a sweep costs nothing per stat and copying one out is the
+    /// caller's decision.
+    fn stats<F>(
+        &self,
+        req: StatsRequest,
+        data_cb: F,
+    ) -> impl Future<Output = KvResult<StatsActionResponse>> + Send
+    where
+        F: FnMut(StatsResponse) + Send;
 
     fn ping(&self, req: PingRequest) -> impl Future<Output = KvResult<PingResponse>> + Send;
     fn reconfigure_authenticator(
@@ -399,7 +413,9 @@ where
     ) -> KvResult<GetCollectionIdResponse> {
         self.update_last_activity();
         let mut op = self
-            .handle_dispatch_side_result(OpsUtil {}.get_collection_id(self.client(), req).await)
+            .handle_dispatch_side_result(
+                self.ops_util().get_collection_id(self.client(), req).await,
+            )
             .await?;
 
         let res = self.handle_response_side_result(op.recv().await).await?;
@@ -505,11 +521,42 @@ where
         .await
     }
 
+    async fn stats<F>(&self, req: StatsRequest<'_>, mut data_cb: F) -> KvResult<StatsActionResponse>
+    where
+        F: FnMut(StatsResponse) + Send,
+    {
+        self.update_last_activity();
+        self.with_dispatch_span(req, |req| async move {
+            let mut op = self
+                .handle_dispatch_side_result(self.ops_util().stats(self.client(), req).await)
+                .await?;
+            let opaque = op.opaque();
+
+            // Read to the empty packet, always: the opaque stays registered
+            // while this op lives, and returning early would drop it with
+            // entries still on their way, which unregisters the opaque and lands
+            // the rest of the sweep in the orphan reporter.
+            loop {
+                let resp = self.handle_response_side_result(op.recv().await).await?;
+                if resp.is_end() {
+                    return Ok((
+                        StatsActionResponse {
+                            server_duration: resp.server_duration,
+                        },
+                        opaque,
+                    ));
+                }
+                data_cb(resp);
+            }
+        })
+        .await
+    }
+
     async fn ping(&self, req: PingRequest<'_>) -> KvResult<PingResponse> {
         self.update_last_activity();
         self.with_dispatch_span(req, |req| async move {
             let mut op = self
-                .handle_dispatch_side_result(OpsUtil {}.ping(self.client(), req).await)
+                .handle_dispatch_side_result(self.ops_util().ping(self.client(), req).await)
                 .await?;
             let opaque = op.opaque();
 
@@ -637,6 +684,12 @@ where
 
         let res = self.handle_response_side_result(op.recv().await).await?;
         Ok(res)
+    }
+
+    fn ops_util(&self) -> OpsUtil {
+        OpsUtil {
+            ext_frames_enabled: self.has_feature(HelloFeature::AltRequests),
+        }
     }
 
     fn ops_rangescan(&self) -> OpsRangeScan {
