@@ -17,6 +17,7 @@
  */
 
 use crate::httpx::client::Client;
+use crate::httpx::request::OnBehalfOfInfo;
 use crate::mgmtx::error;
 use crate::mgmtx::mgmt::{parse_response_json, Management};
 use crate::mgmtx::options::{
@@ -71,6 +72,47 @@ impl<C: Client> Management<C> {
         let user_json: UserAndMetadataJson = parse_response_json(resp).await?;
 
         user_json.try_into()
+    }
+
+    /// A name no user can have, so asking about it never names a real account.
+    ///
+    /// The server caps a username at 128 characters and rejects `@`, so this is
+    /// refused by two independent rules rather than merely being unlikely.
+    const UNNAMEABLE_USER: &'static str = "@ this user cannot exist @";
+
+    /// Whether the caller may manage local users, without needing a user to ask
+    /// about.
+    ///
+    /// There is no endpoint that answers this. What answers it is the difference
+    /// between the two refusals `get_user` can give for a user that is not
+    /// there: a caller who may manage users is told the user does not exist, and
+    /// a caller who may not is told they may not, before the lookup happens. So
+    /// this asks about a name no user can have and reads which refusal comes
+    /// back — anything other than a permission failure means the question was
+    /// allowed to reach the lookup.
+    ///
+    /// Ported from cbcore-rs `src/services/users.rs::may_manage_local_users`.
+    pub async fn may_manage_local_users(
+        &self,
+        on_behalf_of_info: Option<&OnBehalfOfInfo>,
+    ) -> error::Result<()> {
+        let opts = GetUserOptions {
+            on_behalf_of_info,
+            username: Self::UNNAMEABLE_USER,
+            auth_domain: "local",
+        };
+
+        match self.get_user(&opts).await {
+            Err(e) => match e.kind() {
+                error::ErrorKind::Server(server)
+                    if server.kind() == &error::ServerErrorKind::AccessDenied =>
+                {
+                    Err(e)
+                }
+                _ => Ok(()),
+            },
+            Ok(_) => Ok(()),
+        }
     }
 
     pub async fn get_all_users(
@@ -501,5 +543,60 @@ impl<C: Client> Management<C> {
         }
 
         role_str
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::httpx::client::ReqwestClient;
+    use crate::mgmtx::mgmt::Management;
+    use crate::mgmtx::user::Role;
+
+    fn build(role: Role) -> String {
+        Management::<ReqwestClient>::build_role(&role)
+    }
+
+    /// Ported from cbcore-rs `src/services/users.rs::a_role_encodes_its_target_progressively`.
+    ///
+    /// This is the only place a role's target becomes a string, and it is the
+    /// string the server parses back into a grant. It had no test.
+    #[test]
+    fn a_role_encodes_its_target_progressively() {
+        assert_eq!("admin", build(Role::new("admin")));
+        assert_eq!(
+            "data_reader[b]",
+            build(Role::new("data_reader").bucket("b"))
+        );
+        assert_eq!(
+            "data_reader[b:s]",
+            build(Role::new("data_reader").bucket("b").scope("s"))
+        );
+        assert_eq!(
+            "data_reader[b:s:c]",
+            build(
+                Role::new("data_reader")
+                    .bucket("b")
+                    .scope("s")
+                    .collection("c")
+            )
+        );
+    }
+
+    /// A scope with no bucket cannot be expressed and must not be invented.
+    ///
+    /// Dropping the narrower parts is the safe direction: the resulting grant
+    /// is the one the server would have to be told about anyway, where
+    /// `data_reader[:s]` would either be refused or mean something else.
+    #[test]
+    fn a_scope_without_a_bucket_drops_the_narrower_parts() {
+        assert_eq!("data_reader", build(Role::new("data_reader").scope("s")));
+        assert_eq!(
+            "data_reader",
+            build(Role::new("data_reader").scope("s").collection("c"))
+        );
+        assert_eq!(
+            "data_reader",
+            build(Role::new("data_reader").collection("c"))
+        );
     }
 }

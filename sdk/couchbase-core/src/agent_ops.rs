@@ -46,8 +46,9 @@ use crate::options::management::{
     GetBucketStatsOptions, GetCollectionManifestOptions, GetFullBucketConfigOptions,
     GetFullClusterConfigOptions, GetGroupOptions, GetMetaKv2DirOptions, GetMetaKv2Options,
     GetRolesOptions, GetUserOptions, IndexStatusOptions, LoadSampleBucketOptions,
-    SetMetaKv2MultipleOptions, SetMetaKv2Options, SyncMetaKv2QuorumOptions, UpdateBucketOptions,
-    UpdateCollectionOptions, UpsertGroupOptions, UpsertUserOptions,
+    MayManageLocalUsersOptions, SetMetaKv2MultipleOptions, SetMetaKv2Options,
+    SyncMetaKv2QuorumOptions, UpdateBucketOptions, UpdateCollectionOptions, UpsertGroupOptions,
+    UpsertUserOptions,
 };
 use crate::options::ping::PingOptions;
 use crate::options::query::{
@@ -1101,6 +1102,28 @@ impl Agent {
                 .await;
         }
         self.inner.mgmt.get_user(opts).await
+    }
+
+    /// Whether the caller may manage local users.
+    ///
+    /// See [`crate::mgmtx::mgmt::Management::may_manage_local_users`] for why
+    /// this is answered by asking about a user that cannot exist.
+    pub async fn may_manage_local_users(
+        &self,
+        opts: &MayManageLocalUsersOptions<'_>,
+    ) -> Result<()> {
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_MANAGEMENT),
+                    Keyspace::Cluster,
+                    create_span!("manager_users_may_manage_local_users"),
+                    || self.inner.mgmt.may_manage_local_users(opts),
+                )
+                .await;
+        }
+        self.inner.mgmt.may_manage_local_users(opts).await
     }
 
     pub async fn get_all_users(

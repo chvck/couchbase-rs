@@ -601,6 +601,40 @@ impl<'a> EnsureBucketOptions<'a> {
     }
 }
 
+/// Asks whether the caller may manage local users. Carries no target, because
+/// the question is about the caller.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct MayManageLocalUsersOptions<'a> {
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl<'a> MayManageLocalUsersOptions<'a> {
+    pub fn new() -> Self {
+        Self {
+            on_behalf_of: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of = Some(on_behalf_of);
+        self
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+}
+
+impl Default for MayManageLocalUsersOptions<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct GetUserOptions<'a> {

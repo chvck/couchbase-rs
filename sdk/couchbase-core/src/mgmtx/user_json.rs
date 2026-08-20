@@ -72,6 +72,11 @@ pub struct GroupJson {
 #[derive(Deserialize, Debug, Clone, PartialOrd, PartialEq)]
 pub struct UserJson {
     pub id: String,
+    /// The user's display name, which the server omits entirely for a user
+    /// created without one. A single such user on the cluster used to fail the
+    /// whole of `get_all_users`, so an absent display name reads as an empty
+    /// one rather than as a parse error.
+    #[serde(default)]
     pub name: String,
     pub groups: Vec<String>,
     pub roles: Vec<RoleJson>,
@@ -82,6 +87,10 @@ pub struct UserJson {
 #[derive(Deserialize, Clone, Debug, PartialOrd, PartialEq)]
 pub struct UserAndMetadataJson {
     pub id: String,
+    /// Absent, not empty, for a user created without a display name -- see
+    /// [`UserJson::name`]. This is the shape `get_all_users` reads, so one such
+    /// user on the cluster used to fail the whole listing.
+    #[serde(default)]
     pub name: String,
     pub roles: Vec<RoleAndOriginsJson>,
     pub groups: Vec<String>,
@@ -187,5 +196,40 @@ impl TryFrom<UserAndMetadataJson> for UserAndMetadata {
             password_changed,
             external_groups: val.external_groups,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::mgmtx::user_json::{UserAndMetadataJson, UserJson};
+
+    /// A user created without a display name comes back with no `name` key at
+    /// all, not with an empty one. Captured from 8.0.3 against a user another
+    /// SDK's test suite had left behind.
+    const NAMELESS_USER: &str = r#"{
+        "id": "uaad_op_6a74a788",
+        "domain": "local",
+        "roles": [{"role": "bucket_full_access", "bucket_name": "default",
+                   "origins": [{"type": "user"}]}],
+        "groups": [],
+        "external_groups": [],
+        "password_change_date": "2026-08-18T00:00:00.000Z"
+    }"#;
+
+    #[test]
+    fn a_user_with_no_display_name_still_parses() {
+        let parsed: UserAndMetadataJson = serde_json::from_str(NAMELESS_USER).unwrap();
+
+        assert_eq!(parsed.id, "uaad_op_6a74a788");
+        assert_eq!(parsed.name, "");
+    }
+
+    /// The same absence on the shape the write path uses.
+    #[test]
+    fn a_user_with_no_display_name_parses_on_the_write_shape() {
+        let parsed: UserJson =
+            serde_json::from_str(r#"{"id": "u", "groups": [], "roles": []}"#).unwrap();
+
+        assert_eq!(parsed.name, "");
     }
 }

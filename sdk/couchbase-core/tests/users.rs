@@ -25,7 +25,7 @@ use couchbase_core::mgmtx::user::{Group, Role, User, UserAndMetadata};
 use couchbase_core::options::management::{
     DeleteGroupOptions, DeleteUserOptions, EnsureGroupOptions, EnsureUserOptions,
     GetAllGroupsOptions, GetAllUsersOptions, GetGroupOptions, GetRolesOptions, GetUserOptions,
-    UpsertGroupOptions, UpsertUserOptions,
+    MayManageLocalUsersOptions, UpsertGroupOptions, UpsertUserOptions,
 };
 use couchbase_core::{error, mgmtx};
 use std::ops::Add;
@@ -346,4 +346,240 @@ async fn delete_and_ensure_group(agent: &TestAgent, group_name: &str) {
         },
     )
     .await;
+}
+
+/// Ported from cbcore-rs `tests/users_int.rs::a_group_carries_roles_a_user_inherits`.
+///
+/// The group tests above never create a user and the user tests never grant a
+/// group, so nothing crossed the two — and `RoleAndOrigins::origins`, the only
+/// thing that says *where* a privilege came from, was never read by a test at
+/// all. A user granted only a group must still come back holding that group's
+/// roles, marked as inherited.
+#[test]
+fn a_group_carries_roles_a_user_inherits() {
+    run_test(async |mut agent| {
+        if !agent.supports_feature(&TestFeatureCode::UserGroups)
+            || !agent.supports_feature(&TestFeatureCode::UsersMB69096)
+        {
+            return;
+        }
+
+        let group_name = generate_key_with_letter_prefix();
+        let username = generate_key_with_letter_prefix();
+        let bucket = agent.test_setup_config.bucket.clone();
+        let inherited = Role::new("data_reader").bucket(&bucket);
+
+        let group = Group::new(
+            &group_name,
+            generate_key_with_letter_prefix(),
+            vec![inherited.clone()],
+        );
+        create_and_ensure_group(&agent, &group).await;
+
+        // No direct roles at all: everything this user can do arrives through
+        // the group.
+        let user = User::new(&username, generate_key_with_letter_prefix(), vec![])
+            .groups(vec![group_name.clone()])
+            .password("password");
+        create_and_ensure_user(&agent, &user).await;
+
+        let actual = agent
+            .get_user(&GetUserOptions::new(&username, "local"))
+            .await
+            .unwrap();
+
+        // Read everything first, then tear down, so a failed assertion does not
+        // leave a user and a group behind on the cluster.
+        delete_and_ensure_user(&agent, &username).await;
+        delete_and_ensure_group(&agent, &group_name).await;
+
+        assert_eq!(vec![group_name.clone()], actual.user.groups);
+        assert!(
+            actual.user.roles.is_empty(),
+            "the user was granted no roles directly, got {:?}",
+            actual.user.roles
+        );
+
+        // Matched on name and bucket rather than on the whole role: the server
+        // reports an effective bucket-scoped role with its scope and collection
+        // filled in as `*`, where the grant named neither.
+        let effective = actual
+            .effective_roles
+            .iter()
+            .find(|r| r.role.name == inherited.name && r.role.bucket == inherited.bucket)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the group's role did not reach the user: {:?}",
+                    actual.effective_roles
+                )
+            });
+
+        assert_eq!(Some("*"), effective.role.scope.as_deref());
+        assert_eq!(Some("*"), effective.role.collection.as_deref());
+
+        assert!(
+            effective
+                .origins
+                .iter()
+                .any(|o| o.origin_type == "group" && o.name.as_deref() == Some(group_name.as_str())),
+            "the role did not say it was inherited from the group: {:?}",
+            effective.origins
+        );
+    });
+}
+
+/// Ported from cbcore-rs `tests/users_int.rs::an_unknown_role_is_refused_rather_than_dropped`.
+///
+/// There was no negative-path user test of any kind. The failure this guards
+/// against is quiet: a user created with fewer privileges than were asked for
+/// looks like a success and fails much later, somewhere else.
+#[test]
+fn an_unknown_role_is_refused_rather_than_dropped() {
+    run_test(async |mut agent| {
+        if !agent.supports_feature(&TestFeatureCode::UsersMB69096) {
+            return;
+        }
+
+        let username = generate_key_with_letter_prefix();
+        let user = User::new(
+            &username,
+            generate_key_with_letter_prefix(),
+            vec![Role::new("no_such_role_at_all")],
+        )
+        .password("password");
+
+        agent
+            .upsert_user(&UpsertUserOptions::new(&user, "local"))
+            .await
+            .expect_err("the server accepted a role it does not have");
+
+        let err = agent
+            .get_user(&GetUserOptions::new(&username, "local"))
+            .await
+            .expect_err("a refused upsert still created the user");
+
+        match err.kind() {
+            error::ErrorKind::Mgmt(e) => {
+                if let mgmtx::error::ErrorKind::Server(e, ..) = e.kind() {
+                    assert_eq!(e.kind(), &mgmtx::error::ServerErrorKind::UserNotFound);
+                } else {
+                    panic!("expected UserNotFound, got {e:?}");
+                }
+            }
+            _ => panic!("expected UserNotFound, got {err:?}"),
+        }
+    });
+}
+
+/// Ported from cbcore-rs `tests/users_int.rs::the_cluster_publishes_its_role_catalogue`.
+///
+/// `test_get_all_roles` above asserts the list is non-empty and that its first
+/// entry has non-empty fields, which passes whatever the entries are. Which
+/// roles exist, and which of them take a bucket target, is a property of the
+/// server version rather than something to hard-code — so it is read, and this
+/// pins that reading it works.
+#[test]
+fn the_role_catalogue_says_which_roles_take_a_bucket() {
+    run_test(async |mut agent| {
+        let roles = agent.get_roles(&GetRolesOptions::new()).await.unwrap();
+
+        assert!(
+            roles.iter().any(|r| r.role.name == "admin"),
+            "the catalogue did not contain admin"
+        );
+
+        let data_reader = roles
+            .iter()
+            .find(|r| r.role.name == "data_reader")
+            .expect("the catalogue did not contain data_reader");
+
+        assert!(
+            data_reader.role.bucket.is_some(),
+            "data_reader is bucket-scoped and the catalogue should say so: {:?}",
+            data_reader.role
+        );
+        assert!(
+            roles
+                .iter()
+                .find(|r| r.role.name == "admin")
+                .is_some_and(|r| r.role.bucket.is_none()),
+            "admin is cluster-wide and should carry no bucket"
+        );
+    });
+}
+
+/// **The caller can ask whether it may manage users without naming one.**
+///
+/// Both answers are exercised, because the allowed case passes on its own
+/// whether or not the question is really being asked: a call that always
+/// returned `Ok` would look identical. The denial is the detector.
+///
+/// The impersonated identity carries a password, so it reaches the server as
+/// that user's own basic auth and the server's permission check is genuinely
+/// what answers -- see the note in `tests/on_behalf_of.rs`.
+///
+/// Ported from cbcore-rs `src/services/users.rs::may_manage_local_users`, the
+/// one entry point of its users service with no counterpart here.
+#[test]
+fn may_manage_local_users_answers_both_ways() {
+    run_test(async |mut agent| {
+        if !agent.supports_feature(&TestFeatureCode::UserGroups) {
+            return;
+        }
+
+        let admin_verdict = agent
+            .may_manage_local_users(&MayManageLocalUsersOptions::new())
+            .await;
+        assert!(
+            admin_verdict.is_ok(),
+            "the test cluster's administrator should be allowed to manage users, got {admin_verdict:?}"
+        );
+
+        let username = generate_key_with_letter_prefix();
+        let powerless = User::new(&username, "may-manage probe", vec![Role::new("ro_admin")])
+            .password("password");
+
+        agent
+            .upsert_user(&UpsertUserOptions::new(&powerless, "local"))
+            .await
+            .unwrap();
+
+        try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(500),
+            "the probe user did not reach every node in time",
+            async || match agent
+                .ensure_user(&EnsureUserOptions::new(&username, "local", false))
+                .await
+            {
+                Ok(_) => Ok(Some(())),
+                Err(e) => Err(e),
+            },
+        )
+        .await;
+
+        let as_powerless: couchbase_core::httpx::request::OnBehalfOfInfo =
+            couchbase_core::on_behalf_of::OnBehalfOfInfo::new(&username)
+                .password_or_domain(couchbase_core::on_behalf_of::OboPasswordOrDomain::Password(
+                    "password".to_string(),
+                ))
+                .try_into()
+                .expect("an identity with a password should convert");
+
+        let verdict = agent
+            .may_manage_local_users(&MayManageLocalUsersOptions::new().on_behalf_of(&as_powerless))
+            .await;
+
+        let _ = agent
+            .delete_user(&DeleteUserOptions::new(&username, "local"))
+            .await;
+
+        match verdict {
+            Err(e) => assert!(
+                format!("{e}").contains("access denied"),
+                "a user without the role should be refused for the reason it lacks, got {e}"
+            ),
+            Ok(()) => panic!("a user holding only ro_admin should not be allowed to manage users"),
+        }
+    });
 }

@@ -198,7 +198,12 @@ impl<C: Client> Management<C> {
             error::ServerErrorKind::UnsupportedFeature {
                 feature: feature.into(),
             }
-        } else if status == 401 {
+        } else if status == 401 || status == 403 {
+            // 403 is the shape a caller with *some* roles but not the right one
+            // gets, and it was falling through to Unknown -- so the only
+            // permission failure this crate recognised on the mgmt path was the
+            // no-credentials-at-all case. `searchx::search` and
+            // `mgmtx::metakv2` already test the pair together.
             error::ServerErrorKind::AccessDenied
         } else {
             error::ServerErrorKind::Unknown
