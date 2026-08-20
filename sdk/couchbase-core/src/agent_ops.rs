@@ -37,6 +37,7 @@ use crate::options::crud::{
     UpsertOptions,
 };
 use crate::options::diagnostics::DiagnosticsOptions;
+use crate::options::index::IndexScanOptions;
 use crate::options::management::{
     ChangePasswordOptions, CreateBucketOptions, CreateCollectionOptions, CreateScopeOptions,
     DeleteBucketOptions, DeleteCollectionOptions, DeleteGroupOptions, DeleteMetaKv2DirOptions,
@@ -69,6 +70,7 @@ use crate::options::waituntilready::WaitUntilReadyOptions;
 use crate::queryx::index::Index;
 use crate::results::analytics::AnalyticsResultStream;
 use crate::results::diagnostics::DiagnosticsResult;
+use crate::results::index_scan::IndexScanResults;
 use crate::results::kv::{
     AddResult, AppendResult, DecrementResult, DeleteResult, GetAndLockResult, GetAndTouchResult,
     GetCollectionIdResult, GetMetaResult, GetResult, IncrementResult, LookupInResult,
@@ -551,6 +553,46 @@ impl Agent {
                 .await;
         }
         self.inner.query.query(opts).await
+    }
+
+    /// Read a secondary index directly, without going through the query
+    /// service.
+    ///
+    /// The index is named, and the router turns that into a `defnId` and one
+    /// connection per host holding a piece of the index — so a partitioned index
+    /// is read whole rather than one node's share of it.
+    ///
+    /// **The entries are not globally ordered**, and
+    /// [`crate::results::index_scan`] is the contract: sorted within each host's
+    /// stream, unordered across them, and merging them is the caller's because
+    /// the comparison needs the caller's collation. An index that is not
+    /// partitioned has one stream and is therefore ordered;
+    /// [`IndexScanResults::is_index_ordered`](crate::results::index_scan::IndexScanResults::is_index_ordered)
+    /// is how to check rather than assume.
+    pub async fn index_scan(&self, opts: &IndexScanOptions<'_>) -> Result<IndexScanResults> {
+        let bucket_name = self
+            .inner
+            .get_bucket_name()
+            .ok_or_else(|| crate::error::Error::from(crate::error::ErrorKind::NoBucket))?;
+
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_INDEX),
+                    build_keyspace(
+                        Some(&bucket_name),
+                        Some(opts.scope_name),
+                        Some(opts.collection_name),
+                    ),
+                    create_span!("index_scan"),
+                    || self.inner.index.scan(&bucket_name, opts),
+                )
+                .await;
+        }
+
+        #[cfg(not(feature = "top-level-spans"))]
+        self.inner.index.scan(&bucket_name, opts).await
     }
 
     pub async fn prepared_query(&self, opts: QueryOptions) -> Result<QueryResultStream> {

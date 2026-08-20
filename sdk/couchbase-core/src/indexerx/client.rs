@@ -204,6 +204,27 @@ impl Client {
         self.server_version
     }
 
+    /// A client over an in-memory pipe with nothing on the far end.
+    ///
+    /// For the layers above that need *a* connection to move around rather than
+    /// one to talk to — [`indexerclient_provider`](crate::indexerclient_provider)
+    /// is about which connection goes where, and its tests would otherwise need
+    /// a server and a runtime to ask that question. `server_version` is how such
+    /// a test tells two of them apart.
+    #[cfg(test)]
+    pub(crate) fn for_test(server_version: u32) -> Client {
+        // One byte of buffer: nothing is ever written, and a test that did write
+        // should block rather than look like it succeeded.
+        let (stream, _far_end) = tokio::io::duplex(1);
+        Client {
+            framed: Framed::new(
+                Box::new(stream) as Box<dyn ConnectionStream>,
+                PacketCodec::new(DEFAULT_MAX_PAYLOAD),
+            ),
+            server_version,
+        }
+    }
+
     /// Count the entries in an index.
     ///
     /// The whole index — spans belong to [`Client::scan`]. `partitions` is the

@@ -46,6 +46,8 @@ pub mod features;
 mod helpers;
 mod httpcomponent;
 pub mod httpx;
+mod indexcomponent;
+mod indexerclient_provider;
 pub mod indexerx;
 pub mod indexrouter;
 mod kv_orchestration;

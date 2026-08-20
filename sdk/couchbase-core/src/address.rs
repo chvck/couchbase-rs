@@ -18,7 +18,10 @@
 
 use std::fmt::Display;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Hash`, because a queryport is how the index layer keys its connection
+/// pools: a node that moves its port is a different endpoint to connect to, so
+/// the address is the identity and not the node it happens to be on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Address {
     pub host: String,
     pub port: u16,

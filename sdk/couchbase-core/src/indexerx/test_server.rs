@@ -45,7 +45,7 @@ use super::proto::fake;
 
 /// What the server should do when the scan arrives.
 #[derive(Debug, Clone)]
-pub(super) struct Script {
+pub(crate) struct Script {
     /// Frames sent, in order, in reply to a `ScanRequest`.
     pub responses: Vec<Bytes>,
     /// How the scan reply ends.
@@ -60,7 +60,7 @@ pub(super) struct Script {
 /// The three cases are genuinely different on the wire, and conflating them is
 /// how a test ends up asserting something the protocol never does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ScanEnding {
+pub(crate) enum ScanEnding {
     /// The scan is complete: terminate immediately. A real server does this
     /// exactly once, which is why `after_end_stream` is unreachable here.
     Terminated(Terminator),
@@ -73,7 +73,7 @@ pub(super) enum ScanEnding {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Terminator {
+pub(crate) enum Terminator {
     /// What a server sends to a client reporting version >= 9.
     StreamEnd(Option<u64>),
     /// What it sends to an older one.
@@ -92,21 +92,21 @@ impl Default for Script {
 
 /// What the server observed, for a test to assert on afterwards.
 #[derive(Debug, Default)]
-pub(super) struct Observed {
+pub(crate) struct Observed {
     pub requests: Vec<&'static str>,
     /// The raw `ScanRequest` payload, so a test can assert what went on the
     /// wire rather than what the builder intended.
     pub scan_payload: Option<Bytes>,
 }
 
-pub(super) struct TestServer {
+pub(crate) struct TestServer {
     pub addr: Address,
     pub observed: Arc<Mutex<Observed>>,
 }
 
 impl TestServer {
     /// Start a server that will accept exactly one connection.
-    pub(super) async fn start(script: Script) -> TestServer {
+    pub(crate) async fn start(script: Script) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = local_address(&listener);
         let observed = Arc::new(Mutex::new(Observed::default()));
@@ -129,7 +129,7 @@ impl TestServer {
     /// stack, and the interesting run is `--all-features`, where a `native-tls`
     /// client talks to this `rustls` server.
     #[cfg(feature = "rustls-tls")]
-    pub(super) async fn start_tls(script: Script) -> TestServer {
+    pub(crate) async fn start_tls(script: Script) -> TestServer {
         use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
         use tokio_rustls::rustls::ServerConfig;
         use tokio_rustls::TlsAcceptor;
@@ -166,7 +166,7 @@ impl TestServer {
 }
 
 /// The bound address as an [`Address`], which is what `Client::connect` takes.
-pub(super) fn local_address(listener: &TcpListener) -> Address {
+pub(crate) fn local_address(listener: &TcpListener) -> Address {
     let addr = listener.local_addr().expect("addr");
     Address {
         host: addr.ip().to_string(),

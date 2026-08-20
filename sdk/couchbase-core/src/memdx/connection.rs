@@ -45,6 +45,11 @@ pub trait Stream: Debug + AsyncWrite + AsyncRead + Send + Sync + Unpin + 'static
 
 impl Stream for TcpStream {}
 
+/// An in-memory pipe is a stream too, for tests that need a connection to hold
+/// rather than one to talk over.
+#[cfg(test)]
+impl Stream for tokio::io::DuplexStream {}
+
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum ConnectionType {

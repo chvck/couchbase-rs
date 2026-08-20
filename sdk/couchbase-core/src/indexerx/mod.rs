@@ -54,8 +54,12 @@ pub mod status;
 
 #[cfg(test)]
 mod client_test;
+/// The scripted queryport server. `pub(crate)` rather than private to
+/// `indexerx`, because the layers above it — pooling, and the streams a scan
+/// hands out — are the ones whose behaviour only shows up against a server that
+/// ends a scan the way a real one does.
 #[cfg(test)]
-mod test_server;
+pub(crate) mod test_server;
 
 pub use client::{Client, ConnectOptions};
 pub use error::{AuthCode, Error, ErrorKind, ServerError};

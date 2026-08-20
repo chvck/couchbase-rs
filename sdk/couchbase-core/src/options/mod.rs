@@ -20,6 +20,7 @@ pub mod agent;
 pub mod analytics;
 pub mod crud;
 pub mod diagnostics;
+pub mod index;
 pub mod management;
 pub mod ondemand_agentmanager;
 pub mod orphan_reporter;

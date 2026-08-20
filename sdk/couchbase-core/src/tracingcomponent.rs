@@ -67,6 +67,7 @@ pub const SERVICE_VALUE_QUERY: &str = "query";
 pub const SERVICE_VALUE_ANALYTICS: &str = "analytics";
 pub const SERVICE_VALUE_SEARCH: &str = "search";
 pub const SERVICE_VALUE_MANAGEMENT: &str = "management";
+pub const SERVICE_VALUE_INDEX: &str = "index";
 pub const SERVICE_VALUE_EVENTING: &str = "eventing";
 
 pub const SPAN_ATTRIB_OTEL_KIND_KEY: &str = "otel.kind";

@@ -21,6 +21,8 @@ use crate::authenticator::Authenticator;
 use crate::clusterlabels::ClusterLabels;
 use crate::configmanager::ConfigManagerMemdConfig;
 use crate::diagnosticscomponent::DiagnosticsComponentConfig;
+use crate::indexcomponent::IndexComponentConfig;
+use crate::indexrouter::NodeMap;
 use crate::kvclient_babysitter::KvTarget;
 use crate::mgmtcomponent::MgmtComponentConfig;
 use crate::parsedconfig::{ParsedConfig, ParsedConfigFeature};
@@ -45,6 +47,7 @@ pub(crate) struct AgentComponentConfigs {
     pub query_config: QueryComponentConfig,
     pub search_config: SearchComponentConfig,
     pub mgmt_config: MgmtComponentConfig,
+    pub index_config: IndexComponentConfig,
     pub diagnostics_config: DiagnosticsComponentConfig,
     pub tracing_config: TracingComponentConfig,
 }
@@ -83,6 +86,10 @@ impl AgentComponentConfigs {
         let mut analytics_endpoints: HashMap<String, NetworkAndCanonicalEndpoint> = HashMap::new();
         let mut query_endpoints: HashMap<String, NetworkAndCanonicalEndpoint> = HashMap::new();
         let mut search_endpoints: HashMap<String, NetworkAndCanonicalEndpoint> = HashMap::new();
+        // The indexing service's REST port, which answers `/getIndexStatus`.
+        // Its *scan* port is not an HTTP endpoint at all and lives in the node
+        // map below.
+        let mut index_endpoints: HashMap<String, NetworkAndCanonicalEndpoint> = HashMap::new();
 
         for node in network_info.nodes {
             let kv_ep_id = format!("kv{}", node.node_id);
@@ -90,6 +97,7 @@ impl AgentComponentConfigs {
             let analytics_ep_id = format!("analytics{}", node.node_id);
             let query_ep_id = format!("query{}", node.node_id);
             let search_ep_id = format!("search{}", node.node_id);
+            let index_ep_id = format!("index{}", node.node_id);
 
             gcccp_node_ids.push(kv_ep_id.clone());
 
@@ -165,6 +173,19 @@ impl AgentComponentConfigs {
                         },
                     );
                 }
+                if let Some(p) = node.ssl_ports.index_http {
+                    index_endpoints.insert(
+                        index_ep_id,
+                        NetworkAndCanonicalEndpoint {
+                            network_endpoint: format!("https://{}:{}", node.hostname, p),
+                            canonical_endpoint: format!(
+                                "https://{}:{}",
+                                node.canonical_node_info.hostname,
+                                node.canonical_node_info.ssl_ports.index_http.unwrap_or(p),
+                            ),
+                        },
+                    );
+                }
             } else {
                 if let Some(p) = node.non_ssl_ports.kv {
                     kv_data_hosts.insert(
@@ -232,6 +253,22 @@ impl AgentComponentConfigs {
                                 "http://{}:{}",
                                 node.canonical_node_info.hostname,
                                 node.canonical_node_info.non_ssl_ports.search.unwrap_or(p),
+                            ),
+                        },
+                    );
+                }
+                if let Some(p) = node.non_ssl_ports.index_http {
+                    index_endpoints.insert(
+                        index_ep_id,
+                        NetworkAndCanonicalEndpoint {
+                            network_endpoint: format!("http://{}:{}", node.hostname, p),
+                            canonical_endpoint: format!(
+                                "http://{}:{}",
+                                node.canonical_node_info.hostname,
+                                node.canonical_node_info
+                                    .non_ssl_ports
+                                    .index_http
+                                    .unwrap_or(p),
                             ),
                         },
                     );
@@ -308,6 +345,15 @@ impl AgentComponentConfigs {
                 endpoints: mgmt_endpoints,
                 authenticator: authenticator.clone(),
             },
+            index_config: IndexComponentConfig {
+                endpoints: index_endpoints,
+                // Built from the same config snapshot every other component
+                // here is built from, so a scan cannot be routed against a node
+                // map from one moment and an endpoint list from another.
+                nodes: NodeMap::from_config(config, network_type),
+                authenticator: authenticator.clone(),
+                tls_config: tls_config.clone(),
+            },
             diagnostics_config: DiagnosticsComponentConfig {
                 bucket: bucket_name,
                 services: available_services,
@@ -315,5 +361,87 @@ impl AgentComponentConfigs {
             },
             tracing_config: TracingComponentConfig { cluster_labels },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authenticator::PasswordAuthenticator;
+
+    fn configs(tls: Option<TlsConfig>) -> AgentComponentConfigs {
+        AgentComponentConfigs::gen_from_config(
+            &crate::configparser::tests::parse_sample(),
+            "default",
+            tls,
+            None,
+            Authenticator::PasswordAuthenticator(PasswordAuthenticator {
+                username: "u".to_string(),
+                password: "p".to_string(),
+            }),
+        )
+    }
+
+    fn tls_config() -> TlsConfig {
+        #[cfg(feature = "native-tls")]
+        {
+            tokio_native_tls::native_tls::TlsConnector::builder()
+                .build()
+                .expect("a connector")
+        }
+        #[cfg(all(feature = "rustls-tls", not(feature = "native-tls")))]
+        {
+            std::sync::Arc::new(
+                tokio_rustls::rustls::ClientConfig::builder()
+                    .with_root_certificates(tokio_rustls::rustls::RootCertStore::empty())
+                    .with_no_client_auth(),
+            )
+        }
+    }
+
+    #[test]
+    fn the_index_rest_endpoint_is_listed_for_every_node_that_runs_an_indexer() {
+        // The REST port — `/getIndexStatus` — and not the queryport, which is
+        // not an HTTP endpoint and is in the node map instead. The capture's
+        // second node runs search only, and a node with no indexer must be
+        // absent rather than present and unreachable.
+        let endpoints = configs(None).index_config.endpoints;
+
+        assert_eq!(endpoints.len(), 1);
+        assert!(
+            endpoints
+                .values()
+                .all(|e| e.network_endpoint == "http://192.168.107.128:9102"),
+            "{:?}",
+            endpoints
+                .values()
+                .map(|e| &e.network_endpoint)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_tls_arm_takes_index_https_rather_than_the_plain_rest_port() {
+        // `indexHttps` is a port of its own — unlike the queryport, which has no
+        // SSL twin — so this arm has a real choice to get wrong.
+        let endpoints = configs(Some(tls_config())).index_config.endpoints;
+
+        assert_eq!(endpoints.len(), 1);
+        assert!(endpoints
+            .values()
+            .all(|e| e.network_endpoint == "https://192.168.107.128:19102"));
+    }
+
+    #[test]
+    fn the_node_map_is_the_queryport_and_is_built_from_the_same_config() {
+        // Both halves of the join come out of one snapshot: the endpoint to ask
+        // about placement, and the ports to act on the answer.
+        let nodes = configs(None).index_config.nodes;
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes.scan_address("192.168.107.128:8091").map(|a| a.port),
+            Some(9101)
+        );
     }
 }

@@ -41,6 +41,7 @@
 use std::error::Error as StdError;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::httpx;
 use crate::tracingcomponent::MetricsName;
@@ -118,6 +119,13 @@ impl Error {
 
     pub(crate) fn new_decoding_error(msg: impl Into<String>) -> Self {
         Self::new(ErrorKind::Decoding { msg: msg.into() })
+    }
+
+    pub(crate) fn new_pool_exhausted_error(endpoint: impl Into<String>, waited: Duration) -> Self {
+        Self::new(ErrorKind::PoolExhausted {
+            endpoint: endpoint.into(),
+            waited,
+        })
     }
 
     fn new(kind: ErrorKind) -> Self {
@@ -202,6 +210,27 @@ pub enum ErrorKind {
     #[non_exhaustive]
     Decoding {
         msg: String,
+    },
+
+    /// Every connection this host is allowed was in use, and none came free
+    /// before the wait expired.
+    ///
+    /// **Backpressure, not a fault.** Queryport does not multiplex and a scan
+    /// owns its connection for the stream's life, so a per-host connection cap
+    /// is a cap on concurrent scans against that host. Saying so is the point:
+    /// the alternative it replaced opened a connection per scan without limit,
+    /// and the cost arrived as a latency tail and client timeouts that named
+    /// nothing. A caller seeing this should shed load or retry, and an operator
+    /// seeing it should read the pool's stats before raising the cap.
+    ///
+    /// **This module owns no pool** — pooling lives above it. It owns the
+    /// *name*, because this is the taxonomy an `indexerx` caller matches on, and
+    /// splitting the reasons a scan could not start across two enums would make
+    /// every such caller check both.
+    #[non_exhaustive]
+    PoolExhausted {
+        endpoint: String,
+        waited: Duration,
     },
 }
 
@@ -332,6 +361,10 @@ impl Display for ErrorKind {
             }
             ErrorKind::Http(e) => write!(f, "indexerx http error: {e}"),
             ErrorKind::Decoding { msg } => write!(f, "indexerx decoding error: {msg}"),
+            ErrorKind::PoolExhausted { endpoint, waited } => write!(
+                f,
+                "indexerx connection pool for {endpoint} is exhausted; waited {waited:?} for a slot"
+            ),
         }
     }
 }
@@ -349,6 +382,7 @@ impl MetricsName for Error {
             ErrorKind::UnexpectedEof => "indexerx.UnexpectedEof",
             ErrorKind::Http(e) => e.metrics_name(),
             ErrorKind::Decoding { .. } => "indexerx.Decoding",
+            ErrorKind::PoolExhausted { .. } => "indexerx.PoolExhausted",
         }
     }
 }

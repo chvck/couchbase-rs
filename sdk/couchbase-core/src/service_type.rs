@@ -32,6 +32,10 @@ pub(crate) enum InnerServiceType {
     Search,
     Eventing,
     Analytics,
+    /// The indexing service. Its two ports speak different protocols — the REST
+    /// API that [`crate::indexerx::status`] reads and the queryport that scans
+    /// go to — and this names the service, not either port.
+    Index,
     Other(String),
 }
 
@@ -42,6 +46,7 @@ impl ServiceType {
     pub const SEARCH: ServiceType = ServiceType(InnerServiceType::Search);
     pub const EVENTING: ServiceType = ServiceType(InnerServiceType::Eventing);
     pub const ANALYTICS: ServiceType = ServiceType(InnerServiceType::Analytics);
+    pub const INDEX: ServiceType = ServiceType(InnerServiceType::Index);
 }
 
 impl Display for ServiceType {
@@ -53,6 +58,7 @@ impl Display for ServiceType {
             InnerServiceType::Search => "search",
             InnerServiceType::Eventing => "eventing",
             InnerServiceType::Analytics => "analytics",
+            InnerServiceType::Index => "index",
             InnerServiceType::Other(val) => return write!(f, "unknown({val})"),
         };
 

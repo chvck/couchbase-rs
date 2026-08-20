@@ -18,7 +18,7 @@
 
 //! Which indexer serves a scan, and whether the answer is the whole index.
 //!
-//! The counterpart of [`vbucketrouter`](crate::vbucketrouter) for the indexing
+//! The counterpart of `vbucketrouter` for the indexing
 //! service, and the same kind of thing: a routing table with no I/O in it. It
 //! decides, `indexcomponent` acts, and
 //! [`indexerx`](crate::indexerx) speaks the protocol — the split `memdx`,
@@ -41,7 +41,7 @@
 //!
 //! ### Scope, and where the scatter stops
 //!
-//! [`IndexRouter::routes`] resolves a scan to **one route per host** holding a
+//! `IndexRouter::routes` resolves a scan to **one route per host** holding a
 //! piece of the index. A non-partitioned index is the degenerate case of one.
 //!
 //! **Merging those streams back into index order is deliberately not here, and
@@ -216,9 +216,17 @@ pub struct Route {
     pub inst_id: u64,
     pub replica_id: u32,
     pub scan_address: Address,
+    /// Whether the index is partitioned at all.
+    ///
+    /// Carried because it changes how a scan request is *addressed*, not only
+    /// what it covers: a partitioned index is asked for partitions by number,
+    /// and an unpartitioned one is asked for nothing in particular. Its single
+    /// partition is numbered 0, which is not a number the server expects to be
+    /// given.
+    pub partitioned: bool,
     /// The partitions **this host** holds. `[0]` for an index that is not
-    /// partitioned, which is the server's numbering and is passed back to it
-    /// unchanged.
+    /// partitioned, which is the server's numbering and is preserved rather than
+    /// normalised.
     pub partitions: Vec<u64>,
 }
 
@@ -324,6 +332,10 @@ impl From<RouteError> for crate::error::Error {
 /// vbucket map by the agent rather than fetching one.
 pub(crate) struct IndexRouter {
     topology: ArcSwap<Topology>,
+    /// Bumped by every [`IndexRouter::set_topology`]. What a caller compares
+    /// across an await to ask "did somebody else already do this refresh?"
+    /// without holding a lock over the fetch.
+    generation: AtomicUsize,
     /// Round-robin cursor over replicas. Load-aware selection — the Go client's
     /// pending-item counts and response timings — is a later optimization; this
     /// is the version whose behaviour can be stated in one sentence.
@@ -338,6 +350,7 @@ impl IndexRouter {
                 nodes,
                 current: false,
             }),
+            generation: AtomicUsize::new(0),
             next_replica: AtomicUsize::new(0),
         }
     }
@@ -350,6 +363,13 @@ impl IndexRouter {
             nodes,
             current: true,
         }));
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many times the index list has been replaced. Only useful compared
+    /// against itself.
+    pub fn generation(&self) -> usize {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// Take a new node map from a cluster config, and say whether the index
@@ -459,6 +479,7 @@ impl IndexRouter {
                     inst_id: row.inst_id,
                     replica_id: row.replica_id,
                     scan_address,
+                    partitioned: row.partitioned,
                     partitions: partitions.clone(),
                 });
             }

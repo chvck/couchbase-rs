@@ -36,6 +36,7 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::features::BucketFeature;
 use crate::httpcomponent::HttpComponent;
 use crate::httpx::client::{ClientConfig, ReqwestClient};
+use crate::indexcomponent::{IndexComponent, IndexComponentOptions};
 use crate::kvclient::{
     KvClient, KvClientBootstrapOptions, KvClientOptions, StdKvClient, UnsolicitedPacket,
 };
@@ -178,6 +179,7 @@ pub(crate) struct AgentInner {
     pub(crate) query: Arc<QueryComponent<ReqwestClient>>,
     pub(crate) search: Arc<SearchComponent<ReqwestClient>>,
     pub(crate) mgmt: MgmtComponent<ReqwestClient>,
+    pub(crate) index: IndexComponent<ReqwestClient>,
     pub(crate) diagnostics: DiagnosticsComponent<ReqwestClient, AgentClientManager>,
     pub(crate) tracing: Arc<TracingComponent>,
 }
@@ -298,6 +300,7 @@ impl AgentInner {
         self.search
             .reconfigure(agent_component_configs.search_config);
         self.mgmt.reconfigure(agent_component_configs.mgmt_config);
+        self.index.reconfigure(agent_component_configs.index_config);
         self.diagnostics
             .reconfigure(agent_component_configs.diagnostics_config);
         self.tracing
@@ -367,6 +370,17 @@ impl AgentInner {
         self.bulk_conn_mgr.update_auth(opts.authenticator).await;
 
         self.update_state_locked(&mut state).await;
+
+        // **This is the only place the credentials or TLS behind a queryport
+        // connection can change** — nothing else writes `state.authenticator` or
+        // `state.tls_config`, and a config revision reaches
+        // `update_state_locked` without touching either. So the index pools are
+        // emptied here rather than on every revision: doing it there would drop
+        // every pooled connection each time a rebalance published a config,
+        // which is the connection churn the pool was added to remove. After
+        // `update_state_locked`, so the pools the next scan builds are built
+        // from the credentials this call just installed.
+        self.index.drain_pools();
     }
 }
 
@@ -669,6 +683,18 @@ impl Agent {
             },
         ));
 
+        let index_id = Uuid::new_v4().to_string();
+        info!("Agent {} creating index component {}", &agent_id, &index_id);
+        let index = IndexComponent::new(
+            http_client.clone(),
+            agent_component_configs.index_config,
+            IndexComponentOptions {
+                id: index_id,
+                user_agent: user_agent.clone(),
+                tcp_keep_alive_time: state.tcp_keep_alive_time,
+            },
+        );
+
         let diagnostics = DiagnosticsComponent::new(
             conn_mgr.clone(),
             query.clone(),
@@ -693,6 +719,7 @@ impl Agent {
             err_map_component,
 
             mgmt,
+            index,
             analytics,
             query,
             search,

@@ -18,6 +18,7 @@
 
 pub mod analytics;
 pub mod diagnostics;
+pub mod index_scan;
 pub mod kv;
 pub mod pingreport;
 pub mod query;
