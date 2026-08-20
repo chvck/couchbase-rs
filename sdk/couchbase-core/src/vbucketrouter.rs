@@ -187,6 +187,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::cbconfig::TerseConfig;
+    use crate::error::ErrorKind;
     use crate::vbucketmap::VbucketMap;
     use crate::vbucketrouter::{
         NotMyVbucketConfigHandler, StdVbucketRouter, VbucketRouter, VbucketRouterOptions,

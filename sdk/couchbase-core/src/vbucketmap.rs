@@ -63,7 +63,11 @@ impl VbucketMap {
 
     pub fn node_by_vbucket(&self, vb_id: u16, vb_server_idx: u32) -> Result<i16> {
         let num_servers = (self.num_replicas as u32) + 1;
-        if vb_server_idx > num_servers {
+        // `>=`, not `>`: with `num_replicas` replicas there are `num_replicas + 1`
+        // copies, so the last valid index is `num_servers - 1`. Asking for
+        // `num_servers` used to fall through the bound and come back as the
+        // "no server" sentinel, which reads as a routable answer.
+        if vb_server_idx >= num_servers {
             return Err(ErrorKind::InvalidReplica {
                 requested_replica: vb_server_idx,
                 num_servers: num_servers as usize,
@@ -89,6 +93,7 @@ impl VbucketMap {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::ErrorKind;
     use crate::vbucketmap::VbucketMap;
 
     #[test]
@@ -153,5 +158,69 @@ mod tests {
             0x0003u16,
             vb_map.vbucket_by_key(b"hello world, I am a super long key lets see if it works")
         );
+    }
+    /// The lookup itself, over a map whose rows are full width.
+    ///
+    /// Ported from cbcore-rs `src/vbucketmap.rs`. `-1` is this type's "no server
+    /// assigned" sentinel rather than an error, so it is asserted as a value;
+    /// the two out-of-range cases are errors.
+    #[test]
+    fn nodes_are_read_back_by_vbucket_and_replica() {
+        let map = VbucketMap::new(vec![vec![0, 1], vec![1, 0], vec![2, -1]], 1).unwrap();
+
+        assert_eq!(map.num_vbuckets(), 3);
+        assert_eq!(map.num_replicas(), 1);
+        assert_eq!(map.node_by_vbucket(0, 0).unwrap(), 0);
+        assert_eq!(map.node_by_vbucket(0, 1).unwrap(), 1);
+        assert_eq!(map.node_by_vbucket(2, 0).unwrap(), 2);
+
+        // An explicit `-1` slot: no server holds this replica.
+        assert_eq!(map.node_by_vbucket(2, 1).unwrap(), -1);
+
+        // Past the replica count. One replica means two copies, so index 2 is
+        // out of range and must not read back as the sentinel.
+        let err = map.node_by_vbucket(0, 2).unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::InvalidReplica { requested_replica, num_servers }
+                     if *requested_replica == 2 && *num_servers == 2),
+            "expected InvalidReplica, got {err:?}"
+        );
+
+        // Past the end of the map.
+        let err = map.node_by_vbucket(3, 0).unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::InvalidVbucket { requested_vb_id, num_vbuckets }
+                     if *requested_vb_id == 3 && *num_vbuckets == 3),
+            "expected InvalidVbucket, got {err:?}"
+        );
+    }
+
+    /// A row narrower than the replica count reads as unassigned, not as a
+    /// panic and not as someone else's node.
+    ///
+    /// Ported from cbcore-rs. The router turns this `-1` into
+    /// `ErrorKind::NoServerAssigned`, so the sentinel is the contract between
+    /// the two and worth pinning here rather than only there.
+    #[test]
+    fn short_rows_report_no_server_rather_than_reading_the_next_row() {
+        let map = VbucketMap::new(vec![vec![7], vec![8]], 1).unwrap();
+
+        assert_eq!(map.node_by_vbucket(0, 0).unwrap(), 7);
+        assert_eq!(map.node_by_vbucket(1, 0).unwrap(), 8);
+        assert_eq!(map.node_by_vbucket(0, 1).unwrap(), -1);
+    }
+
+    /// A map with no rows is refused outright; a map whose rows are all empty
+    /// constructs but is not valid.
+    ///
+    /// Ported from cbcore-rs, which refuses both in the constructor. Here the
+    /// second case is `is_valid`'s job, and this pins which check owns which.
+    #[test]
+    fn an_empty_map_is_refused_and_empty_rows_are_not_valid() {
+        assert!(VbucketMap::new(vec![], 1).is_err());
+
+        let no_slots = VbucketMap::new(vec![vec![], vec![]], 1).unwrap();
+        assert!(!no_slots.is_valid());
+        assert!(VbucketMap::new(vec![vec![0]], 1).unwrap().is_valid());
     }
 }
