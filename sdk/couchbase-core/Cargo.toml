@@ -53,6 +53,7 @@ tokio-rustls = { version = "0.26.4", optional = true }
 
 [dev-dependencies]
 chrono = "0.4.44"
+criterion = { version = "0.8.2", features = ["async_tokio", "async"] }
 env_logger = "0.11.9"
 envconfig = "0.11.1"
 log = "0.4.29"
@@ -95,3 +96,10 @@ top-level-spans = []
 [lints.rust]
 # This is temporary whilst we build out the root modules.
 unused = "allow"
+
+[lib]
+bench = false
+
+[[bench]]
+name = "query_rows"
+harness = false

@@ -19,6 +19,7 @@
 use crate::httpx::decoder::{Decoder, Token};
 use crate::httpx::error::Error;
 use crate::httpx::error::Result as HttpxResult;
+use bytes::Bytes;
 use futures::{stream, FutureExt, Stream, TryStreamExt};
 use serde_json::Value;
 use std::cmp::{PartialEq, PartialOrd};
@@ -40,7 +41,8 @@ pub struct RawJsonRowStreamer {
 }
 
 pub enum RawJsonRowItem {
-    Row(Vec<u8>),
+    /// A slice of the chunk the row arrived in, so holding it holds that chunk.
+    Row(Bytes),
     Metadata(Vec<u8>),
 }
 
@@ -92,7 +94,7 @@ impl RawJsonRowStreamer {
                         self.state = RowStreamState::Rows;
                     }
                     Token::Value(v) => {
-                        if &v == b"null" {
+                        if v.as_ref() == b"null" {
                             continue;
                         }
 
@@ -242,5 +244,121 @@ impl RawJsonRowStreamer {
         stream::unfold(self, |mut stream| async move {
             stream.next().await.map(|row| (row, stream))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::httpx::decoder::Decoder;
+    use crate::httpx::error;
+    use bytes::Bytes;
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct ChunkStream {
+        chunks: Vec<Bytes>,
+        next: usize,
+    }
+
+    impl Unpin for ChunkStream {}
+
+    impl Stream for ChunkStream {
+        type Item = error::Result<Bytes>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.chunks.len() {
+                return Poll::Ready(None);
+            }
+            let chunk = self.chunks[self.next].clone();
+            self.next += 1;
+            Poll::Ready(Some(Ok(chunk)))
+        }
+    }
+
+    /// Splits `body` into independent `size`-byte chunks, as the transport would.
+    fn chunked(body: &str, size: usize) -> ChunkStream {
+        let bytes = body.as_bytes();
+        let mut chunks = Vec::new();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let end = (offset + size).min(bytes.len());
+            chunks.push(Bytes::copy_from_slice(&bytes[offset..end]));
+            offset = end;
+        }
+        ChunkStream { chunks, next: 0 }
+    }
+
+    async fn read_all(body: &str, chunk_size: usize) -> (Vec<String>, Value) {
+        let mut streamer =
+            RawJsonRowStreamer::new(Decoder::new(chunked(body, chunk_size)), "results");
+        streamer.read_prelude().await.unwrap();
+
+        let mut rows = Vec::new();
+        let mut metadata = None;
+        while let Some(item) = streamer.next().await {
+            match item.unwrap() {
+                RawJsonRowItem::Row(row) => {
+                    rows.push(String::from_utf8(row.to_vec()).unwrap());
+                }
+                RawJsonRowItem::Metadata(meta) => {
+                    metadata = Some(serde_json::from_slice(&meta).unwrap());
+                    break;
+                }
+            }
+        }
+
+        // A response with no row array at all is finished by the time the
+        // prelude has been read, so its metadata comes from the epilog.
+        let metadata = match metadata {
+            Some(metadata) => metadata,
+            None => serde_json::from_slice(&streamer.epilog().unwrap()).unwrap(),
+        };
+
+        (rows, metadata)
+    }
+
+    const RESPONSE: &str = r#"{"requestID":"abc","signature":{"*":"*"},"results":[{"a":1,"s":"one"},{"a":2,"s":"two, with a comma"},{"a":3,"s":"and a \"quote\""},[4,5,6]],"status":"success"}"#;
+
+    /// The row bounds have to survive being fed in at any granularity: a value
+    /// that straddles a chunk boundary is the one case that cannot be handed out
+    /// as a slice, and every boundary is a straddle at a chunk size of one.
+    #[tokio::test]
+    async fn rows_survive_every_chunk_boundary() {
+        let expected = vec![
+            r#"{"a":1,"s":"one"}"#.to_string(),
+            r#"{"a":2,"s":"two, with a comma"}"#.to_string(),
+            r#"{"a":3,"s":"and a \"quote\""}"#.to_string(),
+            "[4,5,6]".to_string(),
+        ];
+
+        for chunk_size in 1..=RESPONSE.len() {
+            let (rows, metadata) = read_all(RESPONSE, chunk_size).await;
+
+            assert_eq!(expected, rows, "chunked {chunk_size} bytes at a time");
+            assert_eq!(
+                Value::from("success"),
+                metadata["status"],
+                "chunked {chunk_size} bytes at a time"
+            );
+            assert_eq!(Value::from("abc"), metadata["requestID"]);
+        }
+    }
+
+    /// The query service answers a failed statement with a null in place of the
+    /// row array and the reason in an errors array beside it. Nothing but the
+    /// named attribute is a row, so the errors must not be read as one.
+    #[tokio::test]
+    async fn a_null_rows_attribute_yields_no_rows() {
+        let body = r#"{"requestID":"abc","results":null,"errors":[{"code":5000,"msg":"boom"}],"status":"fatal"}"#;
+
+        for chunk_size in 1..=body.len() {
+            let (rows, metadata) = read_all(body, chunk_size).await;
+
+            assert!(rows.is_empty(), "chunked {chunk_size} bytes at a time");
+            assert_eq!(Value::from("fatal"), metadata["status"]);
+            assert_eq!(Value::from(5000), metadata["errors"][0]["code"]);
+        }
     }
 }

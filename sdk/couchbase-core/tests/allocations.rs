@@ -22,9 +22,11 @@ use crate::common::test_agent::TestAgent;
 use crate::common::test_config::run_test;
 use couchbase_core::options::crud::{AddOptions, GetOptions, ReplaceOptions, UpsertOptions};
 use couchbase_core::options::management::CreateCollectionOptions;
+use couchbase_core::options::query::QueryOptions;
 use couchbase_core::options::waituntilready::WaitUntilReadyOptions;
 use couchbase_core::retryfailfast::FailFastRetryStrategy;
 use couchbase_core::service_type::ServiceType;
+use futures::StreamExt;
 use serial_test::serial;
 use std::future::Future;
 use std::sync::Arc;
@@ -200,6 +202,44 @@ fn get() {
         })
         .await
     });
+}
+
+#[serial]
+#[cfg(feature = "dhat-heap")]
+#[test]
+fn query() {
+    run_test(async |mut agent| {
+        let opts = QueryOptions::default()
+            .statement("SELECT 1=1".to_string())
+            .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
+
+        // The query path is HTTP, not KV, so it does not share the KV budget:
+        // this pins the request encode plus the row and metadata decode of a
+        // single-row response.
+        let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
+            225
+        } else {
+            222
+        };
+
+        ensure_query_ready(&agent).await;
+
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, _run| {
+            let mut res = agent.query(opts.clone()).await.unwrap();
+            while let Some(row) = res.next().await {
+                row.unwrap();
+            }
+            res.metadata().unwrap();
+        })
+        .await
+    });
+}
+
+async fn ensure_query_ready(agent: &TestAgent) {
+    agent
+        .wait_until_ready(&WaitUntilReadyOptions::new().service_types(vec![ServiceType::QUERY]))
+        .await
+        .unwrap();
 }
 
 async fn ensure_agent_ready(agent: &TestAgent) {

@@ -26,11 +26,32 @@ use tokio_stream::StreamExt;
 
 pub type DecoderStream = dyn Stream<Item = error::Result<Bytes>> + Send + Unpin;
 
+/// How much of the chunk a value may keep alive before it is copied out instead.
+///
+/// A value handed out as a slice costs nothing to produce, but it holds its
+/// whole chunk for as long as the caller holds it. That is a bargain for a value
+/// that is most of its chunk and a disaster for one that is a hundredth of it: a
+/// caller keeping a few small rows out of a large response would hold the entire
+/// response. Copying below this ratio caps what a held value can retain at four
+/// times its own length, whatever size the transport's chunks happen to be.
+const MAX_PIN_RATIO: usize = 4;
+
 pub struct Decoder {
     r: Pin<Box<DecoderStream>>,
-    buf: Vec<u8>,
+    /// The chunk being scanned, exactly as the transport handed it over.
+    ///
+    /// A value that lies inside one chunk is handed out as a slice of that
+    /// chunk, so it costs a reference count rather than a copy. That is why this
+    /// is the transport's `Bytes` and not a `Vec` the chunks are staged into:
+    /// staging would copy every byte of every response on the way in, and
+    /// copying the value back out again on the way to the caller.
+    chunk: Bytes,
+    /// The leading part of a value that began in an earlier chunk.
+    ///
+    /// Only a value straddling a chunk boundary is ever copied, and there is at
+    /// most one of those per chunk whatever the value size.
+    carry: Vec<u8>,
     scanp: usize,
-    scanned: usize,
     scan: Scanner,
     err: Option<error::Error>,
     token_state: TokenState,
@@ -44,9 +65,9 @@ impl Decoder {
     {
         Decoder {
             r: Box::pin(r),
-            buf: Vec::new(),
+            chunk: Bytes::new(),
+            carry: Vec::new(),
             scanp: 0,
-            scanned: 0,
             scan: Scanner::new(),
             err: None,
             token_state: TokenState::TopValue,
@@ -54,7 +75,7 @@ impl Decoder {
         }
     }
 
-    pub async fn decode(&mut self) -> HttpxResult<Vec<u8>> {
+    pub async fn decode(&mut self) -> HttpxResult<Bytes> {
         if let Some(err) = &self.err {
             return Err(err.clone());
         }
@@ -65,38 +86,38 @@ impl Decoder {
             return Err(error::Error::new_message_error("not at beginning of value"));
         }
 
-        let n = self.read_value().await?;
-        let val = self.buf[self.scanp..self.scanp + n].trim_ascii().to_vec();
-        self.scanp += n;
+        let val = self.read_value().await?;
 
         self.token_value_end();
 
         Ok(val)
     }
 
-    fn buffered(&self) -> &[u8] {
-        &self.buf[self.scanp..]
-    }
-
-    async fn read_value(&mut self) -> HttpxResult<usize> {
+    async fn read_value(&mut self) -> HttpxResult<Bytes> {
         self.scan.reset();
+        self.carry.clear();
+
+        // Where the value starts within the current chunk. Once the value has
+        // crossed a chunk boundary the part already seen lives in `carry` and
+        // this is the start of the new chunk.
+        let mut start = self.scanp;
         let mut scanp = self.scanp;
         let mut res: Option<HttpxResult<()>> = None;
 
         loop {
-            while scanp < self.buf.len() {
-                let c = self.buf[scanp];
+            while scanp < self.chunk.len() {
+                let c = self.chunk[scanp];
                 self.scan.incr_bytes(1);
                 match self.scan.step(c) {
                     ScanState::End => {
                         self.scan.incr_bytes(-1);
-                        return Ok(scanp - self.scanp);
+                        return Ok(self.take_value(start, scanp));
                     }
                     ScanState::EndObject | ScanState::EndArray
                         if self.scan.step(b' ') == ScanState::End =>
                     {
                         scanp += 1;
-                        return Ok(scanp - self.scanp);
+                        return Ok(self.take_value(start, scanp));
                     }
                     ScanState::Error => {
                         let scan_err = self.scan.err().expect("scan state error but no error set");
@@ -115,49 +136,101 @@ impl Decoder {
                 return Err(e);
             }
 
-            let n = scanp - self.scanp;
-            res = self.refill().await;
-            scanp = self.scanp + n;
+            res = self.carry_and_refill(start).await;
 
-            if res.is_none() {
-                if self.scan.step(b' ') == ScanState::End {
-                    return Ok(scanp - self.scanp);
+            match res {
+                Some(Ok(())) => {
+                    start = 0;
+                    scanp = 0;
                 }
+                // Nothing new arrived; the scan above will find nothing and the
+                // error is returned on the next pass.
+                Some(Err(_)) => {}
+                None => {
+                    if self.scan.step(b' ') == ScanState::End {
+                        return Ok(self.take_value(start, scanp));
+                    }
 
-                if self.buf.iter().any(|&b| !b.is_ascii_whitespace()) {
-                    self.err = Some(error::Error::new_message_error("unexpected EOF"));
+                    if !self.carry.is_empty()
+                        || self.chunk[start..]
+                            .iter()
+                            .any(|&b| !b.is_ascii_whitespace())
+                    {
+                        self.err = Some(error::Error::new_message_error("unexpected EOF"));
+                    }
+
+                    return match self.err {
+                        Some(ref e) => Err(e.clone()),
+                        None => Ok(self.take_value(start, scanp)),
+                    };
                 }
-
-                return match self.err {
-                    Some(ref e) => Err(e.clone()),
-                    None => Ok(scanp - self.scanp),
-                };
             }
         }
     }
 
-    async fn refill(&mut self) -> Option<HttpxResult<()>> {
-        // Make room to read more into the buffer.
-        // First slide down data already consumed.
-        if self.scanp > 0 {
-            self.scanned += self.scanp;
-            let n = self.buf.len() - self.scanp;
-            self.buf.copy_within(self.scanp.., 0);
-            self.buf.truncate(n);
-            self.scanp = 0;
+    /// Hands out the value running from `start` to `end` in the current chunk,
+    /// with anything carried over from earlier chunks in front of it.
+    ///
+    /// The scanner steps over any whitespace ahead of the value, so the bounds
+    /// can be wider than the value itself and are trimmed back here.
+    fn take_value(&mut self, start: usize, end: usize) -> Bytes {
+        self.scanp = end;
+
+        if self.carry.is_empty() {
+            let raw = &self.chunk[start..end];
+            let lead = raw.len() - raw.trim_ascii_start().len();
+            let len = raw.trim_ascii().len();
+            let (from, to) = (start + lead, start + lead + len);
+
+            if len * MAX_PIN_RATIO >= self.chunk.len() {
+                return self.chunk.slice(from..to);
+            }
+
+            return Bytes::copy_from_slice(&self.chunk[from..to]);
         }
 
-        if let Some(r) = self.r.next().await {
-            return match r {
-                Ok(buf) => {
-                    self.buf.extend_from_slice(&buf[..]);
-                    Some(Ok(()))
-                }
-                Err(e) => Some(Err(e)),
-            };
-        };
+        // The value straddled a chunk boundary, so it exists in no single chunk
+        // and has to be assembled.
+        self.carry.extend_from_slice(&self.chunk[start..end]);
+        let value = Bytes::copy_from_slice(self.carry.trim_ascii());
+        self.carry.clear();
 
-        None
+        value
+    }
+
+    /// Moves the unfinished value starting at `keep_from` into `carry` and takes
+    /// the next chunk.
+    ///
+    /// `None` means the stream ended, in which case the chunk is left alone so
+    /// the caller can still finish the value it already has.
+    async fn carry_and_refill(&mut self, keep_from: usize) -> Option<HttpxResult<()>> {
+        match self.r.next().await {
+            Some(Ok(next)) => {
+                if keep_from < self.chunk.len() {
+                    self.carry.extend_from_slice(&self.chunk[keep_from..]);
+                }
+                self.chunk = next;
+                self.scanp = 0;
+                Some(Ok(()))
+            }
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
+        }
+    }
+
+    /// Takes the next chunk, dropping whatever is left of the current one.
+    ///
+    /// Only safe between values, where the remainder is whitespace.
+    async fn next_chunk(&mut self) -> Option<HttpxResult<()>> {
+        match self.r.next().await {
+            Some(Ok(next)) => {
+                self.chunk = next;
+                self.scanp = 0;
+                Some(Ok(()))
+            }
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
+        }
     }
 
     async fn token_prepare_for_decode(&mut self) -> HttpxResult<()> {
@@ -220,8 +293,8 @@ impl Decoder {
     async fn peek(&mut self) -> Option<HttpxResult<u8>> {
         let mut res = None;
         loop {
-            for i in self.scanp..self.buf.len() {
-                let c = self.buf[i];
+            for i in self.scanp..self.chunk.len() {
+                let c = self.chunk[i];
                 if c.is_ascii_whitespace() {
                     continue;
                 }
@@ -237,7 +310,7 @@ impl Decoder {
                 }
             }
 
-            res = match self.refill().await {
+            res = match self.next_chunk().await {
                 Some(r) => Some(r),
                 None => {
                     return None;
@@ -394,7 +467,8 @@ pub enum TokenState {
 pub enum Token {
     Delim(char),
     String(String),
-    Value(Vec<u8>),
+    /// A slice of the chunk it arrived in, unless it straddled two of them.
+    Value(Bytes),
 }
 
 #[cfg(test)]
@@ -520,13 +594,13 @@ mod tests {
         assert_eq!(token, Token::String("key".to_string()));
         // Read the value
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(Vec::from(r#""value""#)));
+        assert_eq!(token, Token::Value(Bytes::from_static(br#""value""#)));
         // Read the key2
         let token = decoder.token().await.unwrap();
         assert_eq!(token, Token::String("key2".to_string()));
         // Read the value2
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(Vec::from(r#""value2""#)));
+        assert_eq!(token, Token::Value(Bytes::from_static(br#""value2""#)));
         // Read the end of the object
         let token = decoder.token().await.unwrap();
         assert_eq!(token, Token::Delim('}'));
@@ -553,13 +627,13 @@ mod tests {
         assert_eq!(token, Token::Delim('['));
         // Read the first value
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(b"1".to_vec()));
+        assert_eq!(token, Token::Value(Bytes::from_static(b"1")));
         // Read the second value
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(b"2".to_vec()));
+        assert_eq!(token, Token::Value(Bytes::from_static(b"2")));
         // Read the third value
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(b"3".to_vec()));
+        assert_eq!(token, Token::Value(Bytes::from_static(b"3")));
         // Read the end of the array
         let token = decoder.token().await.unwrap();
         assert_eq!(token, Token::Delim(']'));
@@ -572,7 +646,7 @@ mod tests {
         let mut decoder = Decoder::new(stream);
 
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(Vec::from(r#""hello""#)));
+        assert_eq!(token, Token::Value(Bytes::from_static(br#""hello""#)));
     }
 
     #[tokio::test]
@@ -582,7 +656,7 @@ mod tests {
         let mut decoder = Decoder::new(stream);
 
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(b"123".to_vec()));
+        assert_eq!(token, Token::Value(Bytes::from_static(b"123")));
     }
 
     #[tokio::test]
@@ -592,7 +666,7 @@ mod tests {
         let mut decoder = Decoder::new(stream);
 
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(b"true".to_vec()));
+        assert_eq!(token, Token::Value(Bytes::from_static(b"true")));
     }
 
     #[tokio::test]
@@ -602,6 +676,6 @@ mod tests {
         let mut decoder = Decoder::new(stream);
 
         let token = decoder.token().await.unwrap();
-        assert_eq!(token, Token::Value(b"null".to_vec()));
+        assert_eq!(token, Token::Value(Bytes::from_static(b"null")));
     }
 }

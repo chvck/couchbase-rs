@@ -24,7 +24,8 @@ use crate::queryx::error::{Error, ErrorKind, ServerError, ServerErrorKind};
 use crate::queryx::index::Index;
 use crate::queryx::query_options::{
     BuildDeferredIndexesOptions, CreateIndexOptions, CreatePrimaryIndexOptions, DropIndexOptions,
-    DropPrimaryIndexOptions, GetAllIndexesOptions, PingOptions, QueryOptions, WatchIndexesOptions,
+    DropPrimaryIndexOptions, GetAllIndexesOptions, PingOptions, QueryOptions, QueryOptionsBody,
+    WatchIndexesOptions,
 };
 use crate::queryx::query_respreader::QueryRespReader;
 use crate::retry::RetryStrategy;
@@ -57,6 +58,49 @@ pub struct Query<C: Client> {
     pub canonical_endpoint: String,
     pub auth: Auth,
     pub(crate) tracing: Arc<TracingComponent>,
+}
+
+/// A query request body serialised once, ready to be dispatched.
+///
+/// The query service body is derived purely from the options, so a retry of the
+/// same operation sends the same bytes. Building it once and cloning the
+/// `Bytes` keeps re-serialisation out of the retry loop -- and keeps the client
+/// context id stable across attempts, which is what makes them correlatable
+/// server-side.
+#[derive(Clone, Debug)]
+pub struct EncodedQuery {
+    pub(crate) body: Bytes,
+    pub(crate) statement: String,
+    pub(crate) client_context_id: String,
+    pub(crate) on_behalf_of: Option<OnBehalfOfInfo>,
+}
+
+impl EncodedQuery {
+    pub fn encode(opts: &QueryOptions) -> error::Result<Self> {
+        let statement = opts.statement.clone().unwrap_or_default();
+
+        //TODO; this needs re-embedding into options
+        let client_context_id = if let Some(id) = &opts.client_context_id {
+            id.clone()
+        } else {
+            Uuid::new_v4().to_string()
+        };
+
+        let body = Bytes::from(
+            serde_json::to_vec(&QueryOptionsBody {
+                opts,
+                client_context_id: &client_context_id,
+            })
+            .map_err(|e| Error::new_encoding_error(format!("failed to encode options: {e}")))?,
+        );
+
+        Ok(Self {
+            body,
+            statement,
+            client_context_id,
+            on_behalf_of: opts.on_behalf_of.clone(),
+        })
+    }
 }
 
 impl<C: Client> Query<C> {
@@ -97,55 +141,20 @@ impl<C: Client> Query<C> {
         self.http_client.execute(req).await
     }
 
+    /// Encodes `opts` and dispatches it.
+    ///
+    /// Callers that may dispatch the same options more than once should encode
+    /// once with [`EncodedQuery::encode`] and use [`Query::query_encoded`],
+    /// so a retry re-sends the bytes instead of rebuilding them.
     pub async fn query(&self, opts: &QueryOptions) -> error::Result<QueryRespReader> {
-        let statement = if let Some(statement) = &opts.statement {
-            statement.clone()
-        } else {
-            String::new()
-        };
+        self.query_encoded(&EncodedQuery::encode(opts)?).await
+    }
 
-        //TODO; this needs re-embedding into options
-        let client_context_id = if let Some(id) = &opts.client_context_id {
-            id.clone()
-        } else {
-            Uuid::new_v4().to_string()
-        };
-
-        let on_behalf_of = opts.on_behalf_of.clone();
-
-        let mut serialized = serde_json::to_value(opts)
-            .map_err(|e| Error::new_encoding_error(format!("failed to encode options: {e}")))?;
-
-        let mut obj = serialized.as_object_mut().unwrap();
-        let mut client_context_id_entry = obj.get("client_context_id");
-        if client_context_id_entry.is_none() {
-            obj.insert(
-                "client_context_id".to_string(),
-                Value::String(client_context_id.clone()),
-            );
-        }
-
-        if let Some(named_args) = &opts.named_args {
-            for (k, v) in named_args.iter() {
-                let key = if k.starts_with("$") {
-                    k.clone()
-                } else {
-                    format!("${k}")
-                };
-                obj.insert(key, v.clone());
-            }
-        }
-
-        if let Some(raw) = &opts.raw {
-            for (k, v) in raw.iter() {
-                obj.insert(k.to_string(), v.clone());
-            }
-        }
-
-        let body =
-            Bytes::from(serde_json::to_vec(&serialized).map_err(|e| {
-                Error::new_encoding_error(format!("failed to encode options: {e}"))
-            })?);
+    pub async fn query_encoded(&self, req: &EncodedQuery) -> error::Result<QueryRespReader> {
+        let statement = req.statement.clone();
+        let client_context_id = req.client_context_id.clone();
+        let on_behalf_of = req.on_behalf_of.clone();
+        let body = req.body.clone();
 
         let peer_addr = get_host_port_tuple_from_uri(&self.endpoint).unwrap_or_default();
         let canonical_addr =

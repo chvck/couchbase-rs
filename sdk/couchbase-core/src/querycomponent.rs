@@ -32,7 +32,7 @@ use crate::options::query::{
 use crate::queryx::ensure_index_helper::EnsureIndexHelper;
 use crate::queryx::index::Index;
 use crate::queryx::preparedquery::{PreparedQuery, PreparedStatementCache};
-use crate::queryx::query::Query;
+use crate::queryx::query::{EncodedQuery, Query};
 use crate::queryx::query_options::{EnsureIndexPollOptions, PingOptions};
 use crate::results::pingreport::{EndpointPingReport, PingState};
 use crate::results::query::QueryResultStream;
@@ -57,7 +57,7 @@ pub(crate) struct QueryComponent<C: Client> {
     tracing: Arc<TracingComponent>,
 
     retry_manager: Arc<RetryManager>,
-    prepared_cache: Arc<Mutex<PreparedStatementCache>>,
+    prepared_cache: Arc<PreparedStatementCache>,
 }
 
 pub(crate) struct QueryComponentConfig {
@@ -88,7 +88,7 @@ impl<C: Client + 'static> QueryComponent<C> {
             ),
             tracing,
             retry_manager,
-            prepared_cache: Arc::new(Mutex::new(PreparedStatementCache::default())),
+            prepared_cache: Arc::new(PreparedStatementCache::default()),
         }
     }
 
@@ -112,6 +112,11 @@ impl<C: Client + 'static> QueryComponent<C> {
         let endpoint = opts.endpoint.clone();
         let copts = opts.into();
 
+        // The body is a pure function of the options, so encode it once here
+        // rather than inside the retry closure, which would rebuild it on every
+        // attempt.
+        let encoded = EncodedQuery::encode(&copts).map_err(ErrorKind::Query)?;
+
         orchestrate_retries(self.retry_manager.clone(), retry, retry_info, async || {
             self.http_component
                 .orchestrate_endpoint(
@@ -129,7 +134,7 @@ impl<C: Client + 'static> QueryComponent<C> {
                             auth,
                             tracing: self.tracing.clone(),
                         }
-                        .query(&copts)
+                        .query_encoded(&encoded)
                         .await)
                         {
                             Ok(r) => r,

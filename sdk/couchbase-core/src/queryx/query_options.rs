@@ -451,8 +451,18 @@ impl QueryOptions {
     }
 }
 
-impl Serialize for QueryOptions {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+impl QueryOptions {
+    /// Serialises the options as the query service request body.
+    ///
+    /// `generated_client_context_id` is the caller's fallback id, used only when
+    /// the options do not already carry one (directly or via `raw`). Everything
+    /// the server needs is written in this single pass -- there is no
+    /// intermediate `serde_json::Value` to mutate afterwards.
+    fn serialize_body<S>(
+        &self,
+        serializer: S,
+        generated_client_context_id: Option<&str>,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -480,6 +490,19 @@ impl Serialize for QueryOptions {
         serialize_if_not_none!(self.atr_collection, "atr_collection");
         serialize_if_not_none!(self.auto_execute, "auto_execute");
         serialize_if_not_none!(self.client_context_id, "client_context_id");
+        if self.client_context_id.is_none() {
+            if let Some(generated) = generated_client_context_id {
+                // `raw` is written last and would win anyway, but a caller who
+                // supplied their own id there should not also see ours.
+                let overridden = self
+                    .raw
+                    .as_ref()
+                    .is_some_and(|raw| raw.contains_key("client_context_id"));
+                if !overridden {
+                    map.serialize_entry("client_context_id", generated)?;
+                }
+            }
+        }
         serialize_if_not_none!(self.compression, "compression");
         serialize_if_not_none!(self.controls, "controls");
         serialize_if_not_none!(self.creds, "creds");
@@ -540,6 +563,34 @@ impl Serialize for QueryOptions {
         }
 
         map.end()
+    }
+}
+
+impl Serialize for QueryOptions {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.serialize_body(serializer, None)
+    }
+}
+
+/// `QueryOptions` plus the client context id generated for this operation.
+///
+/// Serialising this is the whole request body; the result can be encoded once
+/// and reused across retries.
+pub(crate) struct QueryOptionsBody<'a> {
+    pub opts: &'a QueryOptions,
+    pub client_context_id: &'a str,
+}
+
+impl Serialize for QueryOptionsBody<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.opts
+            .serialize_body(serializer, Some(self.client_context_id))
     }
 }
 
@@ -899,5 +950,71 @@ impl<'a> PingOptions<'a> {
     pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
         self.on_behalf_of = on_behalf_of.into();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body_value(opts: &QueryOptions, client_context_id: &str) -> Value {
+        serde_json::to_value(QueryOptionsBody {
+            opts,
+            client_context_id,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn single_pass_body_prefixes_named_args_and_flattens_raw() {
+        let opts = QueryOptions::new()
+            .statement("SELECT $a, $b".to_string())
+            .named_args(HashMap::from([
+                ("a".to_string(), Value::from(1)),
+                ("$b".to_string(), Value::from(2)),
+            ]))
+            .raw(HashMap::from([(
+                "query_context".to_string(),
+                Value::from("default:travel-sample"),
+            )]));
+
+        let body = body_value(&opts, "generated-id");
+
+        assert_eq!(body["statement"], Value::from("SELECT $a, $b"));
+        assert_eq!(body["$a"], Value::from(1));
+        assert_eq!(body["$b"], Value::from(2));
+        assert!(body.get("a").is_none());
+        assert_eq!(body["query_context"], Value::from("default:travel-sample"));
+        assert_eq!(body["client_context_id"], Value::from("generated-id"));
+    }
+
+    #[test]
+    fn single_pass_body_keeps_an_explicit_client_context_id() {
+        let opts = QueryOptions::new().client_context_id("mine".to_string());
+
+        let body = body_value(&opts, "generated-id");
+
+        assert_eq!(body["client_context_id"], Value::from("mine"));
+    }
+
+    #[test]
+    fn single_pass_body_lets_raw_own_the_client_context_id() {
+        let opts = QueryOptions::new().raw(HashMap::from([(
+            "client_context_id".to_string(),
+            Value::from("from-raw"),
+        )]));
+
+        let body = body_value(&opts, "generated-id");
+
+        assert_eq!(body["client_context_id"], Value::from("from-raw"));
+    }
+
+    #[test]
+    fn serialising_options_alone_omits_the_generated_client_context_id() {
+        let opts = QueryOptions::new().statement("SELECT 1=1".to_string());
+
+        let body = serde_json::to_value(&opts).unwrap();
+
+        assert!(body.get("client_context_id").is_none());
     }
 }

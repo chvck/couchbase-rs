@@ -66,9 +66,7 @@ impl Stream for QueryRespReader {
         let this = self.get_mut();
 
         match this.streamer.poll_next_unpin(cx) {
-            Poll::Ready(Some(Ok(RawJsonRowItem::Row(row_data)))) => {
-                Poll::Ready(Some(Ok(Bytes::from(row_data))))
-            }
+            Poll::Ready(Some(Ok(RawJsonRowItem::Row(row_data)))) => Poll::Ready(Some(Ok(row_data))),
             Poll::Ready(Some(Ok(RawJsonRowItem::Metadata(metadata)))) => {
                 match this.read_final_metadata(metadata) {
                     Ok(meta) => this.meta_data = Some(meta),
