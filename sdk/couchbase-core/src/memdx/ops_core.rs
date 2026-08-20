@@ -69,6 +69,18 @@ impl OpsCore {
             ServerErrorKind::NoBucket
         } else if status == Status::AuthStale {
             ServerErrorKind::AuthStale
+        } else if status == Status::AccessError {
+            // **The same kind the crud ops give it.** `OpsCrud` maps this status
+            // to `Access`; without the arm here every core operation -- `STAT`
+            // among them -- reported a permission refusal as
+            // `UnknownStatus { status: AccessError }`, so a caller classifying
+            // refusals on `ServerErrorKind::Access` missed them and had to match
+            // the inner status instead. A refusal that does not look like one is
+            // the failure this costs: it reads as an internal fault, and the
+            // caller retries what can never work. Found by the collection-stats
+            // on-behalf-of test, which is the first thing in the crate to be
+            // refused on a core op.
+            ServerErrorKind::Access
         } else if status == Status::InvalidArgs {
             return Error::new_invalid_argument_error(
                 "the server rejected the request because one or more arguments were invalid",

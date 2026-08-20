@@ -55,14 +55,17 @@ use crate::common::helpers::{generate_key_with_letter_prefix, is_memdx_error, tr
 use crate::common::test_agent::TestAgent;
 use crate::common::test_config::run_test;
 use couchbase_core::httpx::request::OnBehalfOfInfo as WireOnBehalfOfInfo;
+use couchbase_core::memdx::error::ServerErrorKind;
 use couchbase_core::memdx::status::Status;
 use couchbase_core::mgmtx::user::{Role, User};
 use couchbase_core::on_behalf_of::{OboPasswordOrDomain, OnBehalfOfInfo};
+use couchbase_core::options::crud::{GetOptions, UpsertOptions};
 use couchbase_core::options::management::{
     DeleteUserOptions, EnsureUserOptions, UpsertUserOptions,
 };
 use couchbase_core::options::ping::PingOptions;
 use couchbase_core::options::query::QueryOptions;
+use couchbase_core::options::stats::CollectionStatsOptions;
 use couchbase_core::results::pingreport::{EndpointPingReport, PingState};
 use couchbase_core::service_type::ServiceType;
 use couchbase_core::{error, memdx, queryx};
@@ -500,6 +503,269 @@ fn a_kv_ping_on_behalf_of_a_user_that_exists_is_allowed() {
                 }
                 error!("a ping on behalf of an existing user was refused: {reports:?}");
                 Ok(None)
+            },
+        )
+        .await;
+
+        delete_user(&agent, &username).await;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// KV data operations
+// ---------------------------------------------------------------------------
+
+/// **A write on behalf of a user who may not write must be refused.**
+///
+/// The pair below is deliberately the *unprivileged* direction, because the
+/// privileged one proves nothing: the request already carries the cluster's own
+/// administrator credentials, so an upsert on behalf of anybody succeeds if the
+/// identity is silently dropped. Only a caller who should be refused can tell
+/// "the server applied their permissions" from "the server never heard of them".
+///
+/// That is not hypothetical. The crud options carried no identity at all until
+/// this test was written — `CrudComponent` passed `on_behalf_of: None` at every
+/// request site while memdx had encoded the frame all along — so every KV
+/// operation ran with the agent's own rights. A gateway impersonating its callers
+/// would have had their writes succeed regardless of what they were allowed to
+/// do, which is the one failure direction worth a test of its own.
+#[test]
+fn a_write_on_behalf_of_a_user_without_the_role_is_refused() {
+    run_test(async |mut agent| {
+        if !agent.supports_feature(&TestFeatureCode::UsersMB69096) {
+            return;
+        }
+
+        let username = generate_key_with_letter_prefix();
+        let bucket = agent.test_setup_config.bucket.clone();
+        let key = generate_key_with_letter_prefix();
+
+        // `ro_admin` can read the cluster's configuration and nothing in a
+        // bucket, so it may not write this document.
+        create_user(&agent, &username, vec![Role::new("ro_admin")]).await;
+
+        // The control: the administrator's own write, same agent, same key. If
+        // this fails the assertion below would mean nothing.
+        agent
+            .upsert(UpsertOptions::new(
+                key.as_bytes(),
+                "_default",
+                "_default",
+                b"{}",
+            ))
+            .await
+            .expect("the administrator could not write the document");
+
+        let obo = caller(&username);
+        let refused = try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(500),
+            "the write was never refused for a user with no data access",
+            async || {
+                Ok(agent
+                    .upsert(
+                        UpsertOptions::new(key.as_bytes(), "_default", "_default", b"{}")
+                            .on_behalf_of(Some(&obo)),
+                    )
+                    .await
+                    .err())
+            },
+        )
+        .await;
+
+        delete_user(&agent, &username).await;
+
+        // `Access` rather than the raw status, and via `is_server_error_kind`
+        // rather than a bare match: the crate re-wraps some server errors as
+        // `Resource` to carry the keyspace names, and that predicate is the one
+        // that covers both arms.
+        let memdx = is_memdx_error(&refused).unwrap_or_else(|| {
+            panic!("expected a memdx error, got {refused}");
+        });
+        assert!(
+            memdx.is_server_error_kind(ServerErrorKind::Access),
+            "expected an access refusal, got {refused}"
+        );
+    });
+}
+
+/// The control for the test above: the same call, on behalf of a user who *may*
+/// write, is allowed. Without it, an identity that broke every request would look
+/// exactly like one the server was correctly refusing.
+#[test]
+fn a_write_on_behalf_of_a_user_with_the_role_is_allowed() {
+    run_test(async |mut agent| {
+        if !agent.supports_feature(&TestFeatureCode::UsersMB69096) {
+            return;
+        }
+
+        let username = generate_key_with_letter_prefix();
+        let bucket = agent.test_setup_config.bucket.clone();
+        let key = generate_key_with_letter_prefix();
+
+        create_user(
+            &agent,
+            &username,
+            vec![Role::new("data_writer").bucket(&bucket)],
+        )
+        .await;
+
+        let obo = caller(&username);
+        try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(500),
+            "the write was never allowed for a user holding the role",
+            async || match agent
+                .upsert(
+                    UpsertOptions::new(key.as_bytes(), "_default", "_default", b"{}")
+                        .on_behalf_of(Some(&obo)),
+                )
+                .await
+            {
+                Ok(res) => Ok(Some(res)),
+                Err(e) => {
+                    error!("on-behalf-of write refused: {e}");
+                    Ok(None)
+                }
+            },
+        )
+        .await;
+
+        delete_user(&agent, &username).await;
+    });
+}
+
+/// **A collection's stats are a read of the collection**, and this is the pair
+/// that says so.
+///
+/// `CollectionStatsOptions` carried no identity while `StatsRequest` had encoded
+/// the frame all along — the same gap A12 closed for the crud options, missed
+/// here because stats live in their own options module. It matters more than a
+/// missing identity usually does: a client that already holds the keyspace name
+/// in its own map has *nothing else* consulting the server about permission, so
+/// without this a gateway answering `collStats` for a caller answers with its
+/// own rights and reports a document count the caller may not see.
+///
+/// **The refusal is proven to be about permission, and that took some care.** A
+/// user the KV nodes have not heard of yet is refused with the *same*
+/// `ServerErrorKind::Access` as one who is known and not permitted — only the
+/// context string differs ("is not a Couchbase user") — so asserting on the kind
+/// alone would pass with the identity never reaching the server at all. The wait
+/// below therefore retries *the operation under test* until the answer is a
+/// permission one, which is also the only wait that can be right here: this call
+/// sweeps **every** KV node, so a user known to one of them is not enough. An
+/// earlier version waited on a `get` instead; it passed alone and failed in the
+/// full suite, when the sweep reached a node that had not caught up.
+///
+/// The role grants document reads and not stats, which is a sharper statement
+/// than no access at all: the same user is permitted one KV operation and
+/// refused another, so the server is demonstrably applying *their* rights.
+/// Measured while writing this against 8.0.3 — `data_monitoring` grants the
+/// stats read and `data_reader` does not.
+#[test]
+fn collection_stats_on_behalf_of_a_user_without_the_role_is_refused() {
+    run_test(async |mut agent| {
+        if !agent.supports_feature(&TestFeatureCode::UsersMB69096) {
+            return;
+        }
+
+        let username = generate_key_with_letter_prefix();
+        let bucket = agent.test_setup_config.bucket.clone();
+
+        create_user(
+            &agent,
+            &username,
+            vec![Role::new("data_reader").bucket(&bucket)],
+        )
+        .await;
+
+        // The control: the administrator's own read of the same collection. A
+        // refusal below means nothing if this cannot succeed.
+        agent
+            .collection_stats(CollectionStatsOptions::new("_default", "_default"))
+            .await
+            .expect("the administrator could not read the collection's stats");
+
+        let obo = caller(&username);
+        let refused = try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(500),
+            "the stats read was never refused on permission grounds",
+            async || {
+                match agent
+                    .collection_stats(
+                        CollectionStatsOptions::new("_default", "_default")
+                            .on_behalf_of(Some(&obo)),
+                    )
+                    .await
+                {
+                    // Allowed: either the identity was dropped or the role does
+                    // grant this. Keep waiting, so a failure names the wait
+                    // rather than asserting on a kind that was never reached.
+                    Ok(_) => Ok(None),
+                    // A node that has not learned the user yet, and this call has
+                    // to satisfy all of them.
+                    Err(e) if e.to_string().contains("is not a Couchbase user") => Ok(None),
+                    Err(e) => Ok(Some(e)),
+                }
+            },
+        )
+        .await;
+
+        delete_user(&agent, &username).await;
+
+        // `Access` rather than the raw status, and via `is_server_error_kind`
+        // rather than a bare match, for the reason the write pair above gives.
+        // The kind only arrives because `OpsCore::decode_error` learned this
+        // status alongside this test: `STAT` is a core operation, and core
+        // operations reported every refusal as `UnknownStatus` before that.
+        let memdx = is_memdx_error(&refused).unwrap_or_else(|| {
+            panic!("expected a memdx error, got {refused}");
+        });
+        assert!(
+            memdx.is_server_error_kind(ServerErrorKind::Access),
+            "expected an access refusal, got {refused}"
+        );
+    });
+}
+
+/// The control: the same read on behalf of a user who holds the stats role.
+///
+/// Without it, an identity that broke every `STAT` request would be
+/// indistinguishable from one the server was correctly refusing.
+#[test]
+fn collection_stats_on_behalf_of_a_user_with_the_role_is_allowed() {
+    run_test(async |mut agent| {
+        if !agent.supports_feature(&TestFeatureCode::UsersMB69096) {
+            return;
+        }
+
+        let username = generate_key_with_letter_prefix();
+        let bucket = agent.test_setup_config.bucket.clone();
+
+        create_user(
+            &agent,
+            &username,
+            vec![Role::new("data_monitoring").bucket(&bucket)],
+        )
+        .await;
+
+        let obo = caller(&username);
+        try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(500),
+            "the stats read was never allowed for a user holding the role",
+            async || match agent
+                .collection_stats(
+                    CollectionStatsOptions::new("_default", "_default").on_behalf_of(Some(&obo)),
+                )
+                .await
+            {
+                Ok(res) => Ok(Some(res)),
+                Err(e) => {
+                    error!("on-behalf-of stats read refused: {e}");
+                    Ok(None)
+                }
             },
         )
         .await;

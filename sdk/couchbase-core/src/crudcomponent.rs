@@ -153,7 +153,7 @@ impl<
                         expiry: opts.expiry,
                         preserve_expiry: opts.preserve_expiry,
                         cas: opts.cas,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -199,7 +199,7 @@ impl<
                         collection_id,
                         key: opts.key,
                         vbucket_id,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                     })
                     .map_err(|e| {
                         let e = Self::update_memdx_err(
@@ -237,7 +237,7 @@ impl<
                         collection_id,
                         key: opts.key,
                         vbucket_id,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                     })
                     .map_err(|e| {
                         let e = Self::update_memdx_err(
@@ -280,7 +280,7 @@ impl<
                         key: opts.key,
                         vbucket_id,
                         cas: opts.cas,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -327,7 +327,7 @@ impl<
                         key: opts.key,
                         vbucket_id,
                         lock_time: opts.lock_time,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                     })
                     .map_err(|e| {
                         let e = Self::update_memdx_err(
@@ -366,7 +366,7 @@ impl<
                         key: opts.key,
                         vbucket_id,
                         expiry: opts.expiry,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                     })
                     .map_err(|e| {
                         let e = Self::update_memdx_err(
@@ -405,7 +405,7 @@ impl<
                         key: opts.key,
                         vbucket_id,
                         cas: opts.cas,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                     })
                     .map_err(|e| {
                         let e = Self::update_memdx_err(
@@ -441,7 +441,7 @@ impl<
                         key: opts.key,
                         vbucket_id,
                         expiry: opts.expiry,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                     })
                     .map_err(|e| {
                         let e = Self::update_memdx_err(
@@ -490,7 +490,7 @@ impl<
                         value,
                         datatype,
                         expiry: opts.expiry,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -554,7 +554,7 @@ impl<
                         expiry: opts.expiry,
                         preserve_expiry: opts.preserve_expiry,
                         cas: opts.cas,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -615,7 +615,7 @@ impl<
                         value,
                         datatype,
                         cas: opts.cas,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -676,7 +676,7 @@ impl<
                         value,
                         datatype,
                         cas: opts.cas,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -725,7 +725,7 @@ impl<
                         initial: opts.initial,
                         delta: opts.delta,
                         expiry: opts.expiry,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -775,7 +775,7 @@ impl<
                         initial: opts.initial,
                         delta: opts.delta,
                         expiry: opts.expiry,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -824,7 +824,7 @@ impl<
                         vbucket_id,
                         flags: opts.flags,
                         ops: opts.ops,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                     })
                     .map_err(|e| {
                         let e = Self::update_memdx_err(
@@ -883,7 +883,7 @@ impl<
                         expiry: opts.expiry,
                         preserve_expiry: opts.preserve_expiry,
                         cas: opts.cas,
-                        on_behalf_of: None,
+                        on_behalf_of: opts.on_behalf_of.map(|o| o.username.as_str()),
                         durability_level: opts.durability_level,
                         durability_level_timeout: None,
                     })
@@ -981,7 +981,9 @@ impl<
                                             sampling: opts.sampling.clone(),
                                             snapshot: opts.snapshot.clone(),
                                         },
-                                        on_behalf_of: None,
+                                        on_behalf_of: opts
+                                            .on_behalf_of
+                                            .map(|o| o.username.as_str()),
                                     })
                                     .await
                                     .map_err(|e| {
@@ -1119,8 +1121,12 @@ impl<
 
         let clients = self.bulk_conn_manager.get_client_per_endpoint().await?;
         for client in clients {
+            let mut request = StatsRequest::new(&group_name);
+            if let Some(on_behalf_of) = opts.on_behalf_of {
+                request = request.on_behalf_of(on_behalf_of.username.as_str());
+            }
             let result = client
-                .stats(StatsRequest::new(&group_name), |resp| {
+                .stats(request, |resp| {
                     seen = true;
                     let key = String::from_utf8_lossy(&resp.key);
                     let value = String::from_utf8_lossy(&resp.value);

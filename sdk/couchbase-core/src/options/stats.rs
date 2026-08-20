@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use crate::httpx::request::OnBehalfOfInfo;
 use crate::retry::{RetryStrategy, DEFAULT_RETRY_STRATEGY};
 
 /// Sweep `STAT` across every KV node.
@@ -57,6 +58,18 @@ pub struct CollectionStatsOptions<'a> {
     pub scope_name: &'a str,
     pub collection_name: &'a str,
     pub retry_strategy: Arc<dyn RetryStrategy>,
+    /// Ask as this user rather than as the cluster credentials.
+    ///
+    /// **A stats read is a read of the collection**, so a caller that may not
+    /// see it must not learn its document count either — and for a client whose
+    /// own map already holds the keyspace name, this is the *only* thing that
+    /// consults the server about permission. Without it a gateway answering
+    /// `collStats` on a caller's behalf answers as itself.
+    ///
+    /// KV takes the username alone; the domain travels only on the HTTP form.
+    /// [`StatsOptions`] deliberately has no counterpart: the group sweep is a
+    /// client's own cluster-wide read, never one made for somebody else.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
 }
 
 impl<'a> CollectionStatsOptions<'a> {
@@ -65,7 +78,13 @@ impl<'a> CollectionStatsOptions<'a> {
             scope_name,
             collection_name,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+            on_behalf_of: None,
         }
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
     }
 }
 

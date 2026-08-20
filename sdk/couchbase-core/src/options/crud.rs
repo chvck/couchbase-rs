@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use crate::httpx::request::OnBehalfOfInfo;
 use crate::memdx::datatype::DataTypeFlag;
 use crate::memdx::durability_level::DurabilityLevel;
 use crate::memdx::subdoc::{LookupInOp, MutateInOp, SubdocDocFlag};
@@ -29,6 +30,13 @@ pub struct GetOptions<'a> {
     pub key: &'a [u8],
     pub scope_name: &'a str,
     pub collection_name: &'a str,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -38,12 +46,18 @@ impl<'a> GetOptions<'a> {
             key,
             scope_name,
             collection_name,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -54,6 +68,13 @@ pub struct GetMetaOptions<'a> {
     pub key: &'a [u8],
     pub scope_name: &'a str,
     pub collection_name: &'a str,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -63,12 +84,18 @@ impl<'a> GetMetaOptions<'a> {
             key,
             scope_name,
             collection_name,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -86,6 +113,13 @@ pub struct UpsertOptions<'a> {
     pub preserve_expiry: Option<bool>,
     pub cas: Option<u64>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -107,6 +141,7 @@ impl<'a> UpsertOptions<'a> {
             preserve_expiry: None,
             cas: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -148,6 +183,11 @@ impl<'a> UpsertOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +198,13 @@ pub struct DeleteOptions<'a> {
     pub collection_name: &'a str,
     pub cas: Option<u64>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -169,6 +216,7 @@ impl<'a> DeleteOptions<'a> {
             collection_name,
             cas: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -190,6 +238,11 @@ impl<'a> DeleteOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +253,13 @@ pub struct GetAndLockOptions<'a> {
     pub collection_name: &'a str,
     pub lock_time: u32,
     pub collection_id: Option<u32>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -216,6 +276,7 @@ impl<'a> GetAndLockOptions<'a> {
             collection_name,
             lock_time,
             collection_id: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -229,6 +290,11 @@ impl<'a> GetAndLockOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +304,13 @@ pub struct GetAndTouchOptions<'a> {
     pub scope_name: &'a str,
     pub collection_name: &'a str,
     pub expiry: u32,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -248,12 +321,18 @@ impl<'a> GetAndTouchOptions<'a> {
             scope_name,
             collection_name,
             expiry,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -265,6 +344,13 @@ pub struct UnlockOptions<'a> {
     pub scope_name: &'a str,
     pub collection_name: &'a str,
     pub cas: u64,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -275,12 +361,18 @@ impl<'a> UnlockOptions<'a> {
             scope_name,
             collection_name,
             cas,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -292,6 +384,13 @@ pub struct TouchOptions<'a> {
     pub scope_name: &'a str,
     pub collection_name: &'a str,
     pub expiry: u32,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -302,12 +401,18 @@ impl<'a> TouchOptions<'a> {
             scope_name,
             collection_name,
             expiry,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -323,6 +428,13 @@ pub struct AddOptions<'a> {
     pub datatype: DataTypeFlag,
     pub expiry: Option<u32>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -342,6 +454,7 @@ impl<'a> AddOptions<'a> {
             datatype: DataTypeFlag::default(),
             expiry: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -373,6 +486,11 @@ impl<'a> AddOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -388,6 +506,13 @@ pub struct ReplaceOptions<'a> {
     pub preserve_expiry: Option<bool>,
     pub cas: Option<u64>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -409,6 +534,7 @@ impl<'a> ReplaceOptions<'a> {
             preserve_expiry: None,
             cas: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -450,6 +576,11 @@ impl<'a> ReplaceOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -461,6 +592,13 @@ pub struct AppendOptions<'a> {
     pub value: &'a [u8],
     pub cas: Option<u64>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -478,6 +616,7 @@ impl<'a> AppendOptions<'a> {
             value,
             cas: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -499,6 +638,11 @@ impl<'a> AppendOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -510,6 +654,13 @@ pub struct PrependOptions<'a> {
     pub value: &'a [u8],
     pub cas: Option<u64>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -527,6 +678,7 @@ impl<'a> PrependOptions<'a> {
             value,
             cas: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -548,6 +700,11 @@ impl<'a> PrependOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -560,6 +717,13 @@ pub struct IncrementOptions<'a> {
     pub delta: u64,
     pub expiry: Option<u32>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -573,6 +737,7 @@ impl<'a> IncrementOptions<'a> {
             delta,
             expiry: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -597,6 +762,11 @@ impl<'a> IncrementOptions<'a> {
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -611,6 +781,13 @@ pub struct DecrementOptions<'a> {
     pub delta: u64,
     pub expiry: Option<u32>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -624,6 +801,7 @@ impl<'a> DecrementOptions<'a> {
             delta,
             expiry: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -650,6 +828,11 @@ impl<'a> DecrementOptions<'a> {
         self.retry_strategy = retry_strategy;
         self
     }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -660,6 +843,13 @@ pub struct LookupInOptions<'a> {
     pub collection_name: &'a str,
     pub ops: &'a [LookupInOp<'a>],
     pub flags: SubdocDocFlag,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -676,6 +866,7 @@ impl<'a> LookupInOptions<'a> {
             collection_name,
             ops,
             flags: SubdocDocFlag::empty(),
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -687,6 +878,11 @@ impl<'a> LookupInOptions<'a> {
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -703,6 +899,13 @@ pub struct MutateInOptions<'a> {
     pub preserve_expiry: Option<bool>,
     pub cas: Option<u64>,
     pub durability_level: Option<DurabilityLevel>,
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header, so the password-or-domain half is not
+    /// part of this mechanism at all. Absent means the request runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -723,6 +926,7 @@ impl<'a> MutateInOptions<'a> {
             preserve_expiry: None,
             cas: None,
             durability_level: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -757,6 +961,11 @@ impl<'a> MutateInOptions<'a> {
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }

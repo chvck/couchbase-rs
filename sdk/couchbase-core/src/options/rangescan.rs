@@ -19,6 +19,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::httpx::request::OnBehalfOfInfo;
 use crate::memdx::ops_rangescan::{
     RangeScanCreateRandomSamplingConfig, RangeScanCreateRangeScanConfig,
     RangeScanCreateSnapshotRequirements,
@@ -49,6 +50,12 @@ pub struct RangeScanCreateOptions<'a> {
     /// consistent snapshot rather than each vbucket's latest state.
     pub snapshot: Option<RangeScanCreateSnapshotRequirements>,
 
+    /// The user whose permissions the server should apply.
+    ///
+    /// KV takes the name and nothing else — the identity travels as a memcached
+    /// framing extra rather than a header. Absent means the scan runs as the
+    /// cluster credentials the agent holds.
+    pub on_behalf_of: Option<&'a OnBehalfOfInfo>,
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
@@ -62,6 +69,7 @@ impl<'a> RangeScanCreateOptions<'a> {
             range: None,
             sampling: None,
             snapshot: None,
+            on_behalf_of: None,
             retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
         }
     }
@@ -88,6 +96,11 @@ impl<'a> RangeScanCreateOptions<'a> {
 
     pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
         self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<&'a OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
