@@ -46,6 +46,15 @@ const SERVER_VERSION_762: NodeVersion = NodeVersion {
     modifier: None,
 };
 
+const SERVER_VERSION_800: NodeVersion = NodeVersion {
+    major: 8,
+    minor: 0,
+    patch: 0,
+    build: 0,
+    edition: None,
+    modifier: None,
+};
+
 const SERVER_VERSION_800_COMMUNITY: NodeVersion = NodeVersion {
     major: 8,
     minor: 0,
@@ -70,6 +79,7 @@ pub enum TestFeatureCode {
     UserGroups,
     UsersMB69096,
     PingRSCBC220,
+    Metakv2,
 }
 
 impl TestAgent {
@@ -105,6 +115,9 @@ impl TestAgent {
             TestFeatureCode::PingRSCBC220 => {
                 self.cluster_version.edition != Some(NodeEdition::Community)
             }
+            // `/_metakv2` is an internal endpoint that a pre-8.0 server does not
+            // route at all, so everything against it would 404.
+            TestFeatureCode::Metakv2 => !self.cluster_version.lower(&SERVER_VERSION_800),
         }
     }
 }

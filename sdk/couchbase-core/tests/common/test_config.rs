@@ -56,7 +56,10 @@ pub struct EnvTestConfig {
     pub default_collection: String,
     #[envconfig(from = "RCBDATA_TIMEOUT", default = "2500")]
     pub data_timeout: String,
-    #[envconfig(from = "RCBSERVER_VERSION", default = "7.6.2")]
+    // Kept in step with the default connection string above, which points at an
+    // 8.0.3 cluster: a version gate that a local run cannot satisfy skips
+    // silently, and CI overrides this per matrix row anyway.
+    #[envconfig(from = "RCBSERVER_VERSION", default = "8.0.3")]
     pub server_version: String,
 }
 

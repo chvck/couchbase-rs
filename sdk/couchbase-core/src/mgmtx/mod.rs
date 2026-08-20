@@ -22,6 +22,7 @@ mod bucket_settings_json;
 pub mod error;
 pub mod group_helper;
 pub mod manifest_helper;
+pub mod metakv2;
 pub mod mgmt;
 pub mod mgmt_bucket;
 pub mod mgmt_collection;

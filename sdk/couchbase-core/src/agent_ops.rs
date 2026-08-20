@@ -21,11 +21,12 @@ use crate::clusterlabels::ClusterLabels;
 use crate::error::Result;
 use crate::features::BucketFeature;
 use crate::mgmtx::bucket_settings::BucketDef;
+use crate::mgmtx::metakv2::MetaKv2Entry;
 use crate::mgmtx::mgmt::AutoFailoverSettings;
 use crate::mgmtx::mgmt_query::IndexStatus;
 use crate::mgmtx::responses::{
     CreateCollectionResponse, CreateScopeResponse, DeleteCollectionResponse, DeleteScopeResponse,
-    UpdateCollectionResponse,
+    GetMetaKv2DirResponse, MetaKv2MutationResponse, UpdateCollectionResponse,
 };
 use crate::mgmtx::user::{Group, RoleAndDescription, UserAndMetadata};
 use crate::options::analytics::{AnalyticsOptions, GetPendingMutationsOptions};
@@ -38,13 +39,15 @@ use crate::options::crud::{
 use crate::options::diagnostics::DiagnosticsOptions;
 use crate::options::management::{
     ChangePasswordOptions, CreateBucketOptions, CreateCollectionOptions, CreateScopeOptions,
-    DeleteBucketOptions, DeleteCollectionOptions, DeleteGroupOptions, DeleteScopeOptions,
-    DeleteUserOptions, EnsureBucketOptions, EnsureGroupOptions, EnsureManifestOptions,
-    EnsureUserOptions, FlushBucketOptions, GetAllBucketsOptions, GetAllGroupsOptions,
-    GetAllUsersOptions, GetAutoFailoverSettingsOptions, GetBucketOptions, GetBucketStatsOptions,
-    GetCollectionManifestOptions, GetFullBucketConfigOptions, GetFullClusterConfigOptions,
-    GetGroupOptions, GetRolesOptions, GetUserOptions, IndexStatusOptions, LoadSampleBucketOptions,
-    UpdateBucketOptions, UpdateCollectionOptions, UpsertGroupOptions, UpsertUserOptions,
+    DeleteBucketOptions, DeleteCollectionOptions, DeleteGroupOptions, DeleteMetaKv2DirOptions,
+    DeleteScopeOptions, DeleteUserOptions, EnsureBucketOptions, EnsureGroupOptions,
+    EnsureManifestOptions, EnsureUserOptions, FlushBucketOptions, GetAllBucketsOptions,
+    GetAllGroupsOptions, GetAllUsersOptions, GetAutoFailoverSettingsOptions, GetBucketOptions,
+    GetBucketStatsOptions, GetCollectionManifestOptions, GetFullBucketConfigOptions,
+    GetFullClusterConfigOptions, GetGroupOptions, GetMetaKv2DirOptions, GetMetaKv2Options,
+    GetRolesOptions, GetUserOptions, IndexStatusOptions, LoadSampleBucketOptions,
+    SetMetaKv2MultipleOptions, SetMetaKv2Options, SyncMetaKv2QuorumOptions, UpdateBucketOptions,
+    UpdateCollectionOptions, UpsertGroupOptions, UpsertUserOptions,
 };
 use crate::options::ping::PingOptions;
 use crate::options::query::{
@@ -1331,5 +1334,120 @@ impl Agent {
         opts: &GetBucketStatsOptions<'_>,
     ) -> Result<Box<RawValue>> {
         self.inner.mgmt.get_bucket_stats(opts).await
+    }
+
+    /// Read one leaf from the internal metakv2 store.
+    ///
+    /// See [`crate::mgmtx::metakv2`] for what this store guarantees and what it
+    /// does not — notably that a successful read is a snapshot, not necessarily a
+    /// fresh one.
+    pub async fn get_metakv2(&self, opts: &GetMetaKv2Options<'_>) -> Result<MetaKv2Entry> {
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_MANAGEMENT),
+                    Keyspace::Cluster,
+                    create_span!("manager_metakv2_get"),
+                    || self.inner.mgmt.get_metakv2(opts),
+                )
+                .await;
+        }
+        self.inner.mgmt.get_metakv2(opts).await
+    }
+
+    /// Read every leaf under a metakv2 directory as one cross-key consistent
+    /// snapshot.
+    pub async fn get_metakv2_dir(
+        &self,
+        opts: &GetMetaKv2DirOptions<'_>,
+    ) -> Result<GetMetaKv2DirResponse> {
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_MANAGEMENT),
+                    Keyspace::Cluster,
+                    create_span!("manager_metakv2_get_dir"),
+                    || self.inner.mgmt.get_metakv2_dir(opts),
+                )
+                .await;
+        }
+        self.inner.mgmt.get_metakv2_dir(opts).await
+    }
+
+    /// Write one metakv2 leaf, optionally conditional on its current revision.
+    pub async fn set_metakv2(
+        &self,
+        opts: &SetMetaKv2Options<'_>,
+    ) -> Result<MetaKv2MutationResponse> {
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_MANAGEMENT),
+                    Keyspace::Cluster,
+                    create_span!("manager_metakv2_set"),
+                    || self.inner.mgmt.set_metakv2(opts),
+                )
+                .await;
+        }
+        self.inner.mgmt.set_metakv2(opts).await
+    }
+
+    /// Commit a set of metakv2 writes atomically.
+    pub async fn set_metakv2_multiple(
+        &self,
+        opts: &SetMetaKv2MultipleOptions<'_>,
+    ) -> Result<MetaKv2MutationResponse> {
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_MANAGEMENT),
+                    Keyspace::Cluster,
+                    create_span!("manager_metakv2_set_multiple"),
+                    || self.inner.mgmt.set_metakv2_multiple(opts),
+                )
+                .await;
+        }
+        self.inner.mgmt.set_metakv2_multiple(opts).await
+    }
+
+    /// Remove a metakv2 subtree and everything under it. There is no conditional
+    /// delete: a revision is accepted by the endpoint and ignored.
+    pub async fn delete_metakv2_dir(
+        &self,
+        opts: &DeleteMetaKv2DirOptions<'_>,
+    ) -> Result<MetaKv2MutationResponse> {
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_MANAGEMENT),
+                    Keyspace::Cluster,
+                    create_span!("manager_metakv2_delete_dir"),
+                    || self.inner.mgmt.delete_metakv2_dir(opts),
+                )
+                .await;
+        }
+        self.inner.mgmt.delete_metakv2_dir(opts).await
+    }
+
+    /// Ask the node this lands on to confirm it still has quorum, which is the
+    /// only measured way to tell a current node from a stale one.
+    pub async fn sync_metakv2_quorum(&self, opts: &SyncMetaKv2QuorumOptions<'_>) -> Result<()> {
+        #[cfg(feature = "top-level-spans")]
+        {
+            return self
+                .execute_observable_operation(
+                    Some(crate::tracingcomponent::SERVICE_VALUE_MANAGEMENT),
+                    Keyspace::Cluster,
+                    create_span!("manager_metakv2_sync_quorum"),
+                    || self.inner.mgmt.sync_metakv2_quorum(opts),
+                )
+                .await;
+        }
+        self.inner.mgmt.sync_metakv2_quorum(opts).await
     }
 }

@@ -27,6 +27,7 @@ use crate::mgmtx::bucket_helper::EnsureBucketHelper;
 use crate::mgmtx::bucket_settings::BucketDef;
 use crate::mgmtx::group_helper::EnsureGroupHelper;
 use crate::mgmtx::manifest_helper::EnsureManifestHelper;
+use crate::mgmtx::metakv2::MetaKv2Entry;
 use crate::mgmtx::mgmt::AutoFailoverSettings;
 use crate::mgmtx::mgmt_query::IndexStatus;
 use crate::mgmtx::node_target::NodeTarget;
@@ -36,19 +37,21 @@ use crate::mgmtx::options::{
 };
 use crate::mgmtx::responses::{
     CreateCollectionResponse, CreateScopeResponse, DeleteCollectionResponse, DeleteScopeResponse,
-    UpdateCollectionResponse,
+    GetMetaKv2DirResponse, MetaKv2MutationResponse, UpdateCollectionResponse,
 };
 use crate::mgmtx::user::{Group, RoleAndDescription, UserAndMetadata};
 use crate::mgmtx::user_helper::EnsureUserHelper;
 use crate::options::management::{
     ChangePasswordOptions, CreateBucketOptions, CreateCollectionOptions, CreateScopeOptions,
-    DeleteBucketOptions, DeleteCollectionOptions, DeleteGroupOptions, DeleteScopeOptions,
-    DeleteUserOptions, EnsureBucketOptions, EnsureGroupOptions, EnsureManifestOptions,
-    EnsureUserOptions, FlushBucketOptions, GetAllBucketsOptions, GetAllGroupsOptions,
-    GetAllUsersOptions, GetAutoFailoverSettingsOptions, GetBucketOptions, GetBucketStatsOptions,
-    GetCollectionManifestOptions, GetFullBucketConfigOptions, GetFullClusterConfigOptions,
-    GetGroupOptions, GetRolesOptions, GetUserOptions, IndexStatusOptions, LoadSampleBucketOptions,
-    UpdateBucketOptions, UpdateCollectionOptions, UpsertGroupOptions, UpsertUserOptions,
+    DeleteBucketOptions, DeleteCollectionOptions, DeleteGroupOptions, DeleteMetaKv2DirOptions,
+    DeleteScopeOptions, DeleteUserOptions, EnsureBucketOptions, EnsureGroupOptions,
+    EnsureManifestOptions, EnsureUserOptions, FlushBucketOptions, GetAllBucketsOptions,
+    GetAllGroupsOptions, GetAllUsersOptions, GetAutoFailoverSettingsOptions, GetBucketOptions,
+    GetBucketStatsOptions, GetCollectionManifestOptions, GetFullBucketConfigOptions,
+    GetFullClusterConfigOptions, GetGroupOptions, GetMetaKv2DirOptions, GetMetaKv2Options,
+    GetRolesOptions, GetUserOptions, IndexStatusOptions, LoadSampleBucketOptions,
+    SetMetaKv2MultipleOptions, SetMetaKv2Options, SyncMetaKv2QuorumOptions, UpdateBucketOptions,
+    UpdateCollectionOptions, UpsertGroupOptions, UpsertUserOptions,
 };
 use crate::retry::{orchestrate_retries, RetryManager, RetryRequest};
 use crate::retrybesteffort::ExponentialBackoffCalculator;
@@ -1297,6 +1300,213 @@ impl<C: Client> MgmtComponent<C> {
                             tracing: Default::default(),
                         }
                         .get_bucket_stats(&copts)
+                        .await
+                        .map_err(|e| ErrorKind::Mgmt(e).into())
+                    },
+                )
+                .await
+        })
+        .await
+    }
+
+    pub async fn get_metakv2(&self, opts: &GetMetaKv2Options<'_>) -> error::Result<MetaKv2Entry> {
+        let retry_info = RetryRequest::new("get_metakv2", false);
+        let retry = opts.retry_strategy.clone();
+        let copts = opts.into();
+
+        orchestrate_retries(self.retry_manager.clone(), retry, retry_info, async || {
+            self.http_component
+                .orchestrate_endpoint(
+                    None,
+                    async |client: Arc<C>,
+                           endpoint_id: String,
+                           endpoint: String,
+                           canonical_endpoint: String,
+                           auth: Auth| {
+                        mgmtx::mgmt::Management::<C> {
+                            http_client: client,
+                            user_agent: self.http_component.user_agent().to_string(),
+                            endpoint,
+                            canonical_endpoint,
+                            auth,
+                            tracing: self.tracing.clone(),
+                        }
+                        .get_metakv2(&copts)
+                        .await
+                        .map_err(|e| ErrorKind::Mgmt(e).into())
+                    },
+                )
+                .await
+        })
+        .await
+    }
+
+    pub async fn get_metakv2_dir(
+        &self,
+        opts: &GetMetaKv2DirOptions<'_>,
+    ) -> error::Result<GetMetaKv2DirResponse> {
+        let retry_info = RetryRequest::new("get_metakv2_dir", false);
+        let retry = opts.retry_strategy.clone();
+        let copts = opts.into();
+
+        orchestrate_retries(self.retry_manager.clone(), retry, retry_info, async || {
+            self.http_component
+                .orchestrate_endpoint(
+                    None,
+                    async |client: Arc<C>,
+                           endpoint_id: String,
+                           endpoint: String,
+                           canonical_endpoint: String,
+                           auth: Auth| {
+                        mgmtx::mgmt::Management::<C> {
+                            http_client: client,
+                            user_agent: self.http_component.user_agent().to_string(),
+                            endpoint,
+                            canonical_endpoint,
+                            auth,
+                            tracing: self.tracing.clone(),
+                        }
+                        .get_metakv2_dir(&copts)
+                        .await
+                        .map_err(|e| ErrorKind::Mgmt(e).into())
+                    },
+                )
+                .await
+        })
+        .await
+    }
+
+    pub async fn set_metakv2(
+        &self,
+        opts: &SetMetaKv2Options<'_>,
+    ) -> error::Result<MetaKv2MutationResponse> {
+        let retry_info = RetryRequest::new("set_metakv2", false);
+        let retry = opts.retry_strategy.clone();
+        let copts = opts.into();
+
+        orchestrate_retries(self.retry_manager.clone(), retry, retry_info, async || {
+            self.http_component
+                .orchestrate_endpoint(
+                    None,
+                    async |client: Arc<C>,
+                           endpoint_id: String,
+                           endpoint: String,
+                           canonical_endpoint: String,
+                           auth: Auth| {
+                        mgmtx::mgmt::Management::<C> {
+                            http_client: client,
+                            user_agent: self.http_component.user_agent().to_string(),
+                            endpoint,
+                            canonical_endpoint,
+                            auth,
+                            tracing: self.tracing.clone(),
+                        }
+                        .set_metakv2(&copts)
+                        .await
+                        .map_err(|e| ErrorKind::Mgmt(e).into())
+                    },
+                )
+                .await
+        })
+        .await
+    }
+
+    pub async fn set_metakv2_multiple(
+        &self,
+        opts: &SetMetaKv2MultipleOptions<'_>,
+    ) -> error::Result<MetaKv2MutationResponse> {
+        let retry_info = RetryRequest::new("set_metakv2_multiple", false);
+        let retry = opts.retry_strategy.clone();
+        let copts = opts.into();
+
+        orchestrate_retries(self.retry_manager.clone(), retry, retry_info, async || {
+            self.http_component
+                .orchestrate_endpoint(
+                    None,
+                    async |client: Arc<C>,
+                           endpoint_id: String,
+                           endpoint: String,
+                           canonical_endpoint: String,
+                           auth: Auth| {
+                        mgmtx::mgmt::Management::<C> {
+                            http_client: client,
+                            user_agent: self.http_component.user_agent().to_string(),
+                            endpoint,
+                            canonical_endpoint,
+                            auth,
+                            tracing: self.tracing.clone(),
+                        }
+                        .set_metakv2_multiple(&copts)
+                        .await
+                        .map_err(|e| ErrorKind::Mgmt(e).into())
+                    },
+                )
+                .await
+        })
+        .await
+    }
+
+    pub async fn delete_metakv2_dir(
+        &self,
+        opts: &DeleteMetaKv2DirOptions<'_>,
+    ) -> error::Result<MetaKv2MutationResponse> {
+        let retry_info = RetryRequest::new("delete_metakv2_dir", false);
+        let retry = opts.retry_strategy.clone();
+        let copts = opts.into();
+
+        orchestrate_retries(self.retry_manager.clone(), retry, retry_info, async || {
+            self.http_component
+                .orchestrate_endpoint(
+                    None,
+                    async |client: Arc<C>,
+                           endpoint_id: String,
+                           endpoint: String,
+                           canonical_endpoint: String,
+                           auth: Auth| {
+                        mgmtx::mgmt::Management::<C> {
+                            http_client: client,
+                            user_agent: self.http_component.user_agent().to_string(),
+                            endpoint,
+                            canonical_endpoint,
+                            auth,
+                            tracing: self.tracing.clone(),
+                        }
+                        .delete_metakv2_dir(&copts)
+                        .await
+                        .map_err(|e| ErrorKind::Mgmt(e).into())
+                    },
+                )
+                .await
+        })
+        .await
+    }
+
+    pub async fn sync_metakv2_quorum(
+        &self,
+        opts: &SyncMetaKv2QuorumOptions<'_>,
+    ) -> error::Result<()> {
+        let retry_info = RetryRequest::new("sync_metakv2_quorum", false);
+        let retry = opts.retry_strategy.clone();
+        let copts = opts.into();
+
+        orchestrate_retries(self.retry_manager.clone(), retry, retry_info, async || {
+            self.http_component
+                .orchestrate_endpoint(
+                    None,
+                    async |client: Arc<C>,
+                           endpoint_id: String,
+                           endpoint: String,
+                           canonical_endpoint: String,
+                           auth: Auth| {
+                        mgmtx::mgmt::Management::<C> {
+                            http_client: client,
+                            user_agent: self.http_component.user_agent().to_string(),
+                            endpoint,
+                            canonical_endpoint,
+                            auth,
+                            tracing: self.tracing.clone(),
+                        }
+                        .sync_metakv2_quorum(&copts)
                         .await
                         .map_err(|e| ErrorKind::Mgmt(e).into())
                     },

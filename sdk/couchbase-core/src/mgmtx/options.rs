@@ -19,8 +19,10 @@
 use crate::httpx::client::Client;
 use crate::httpx::request::OnBehalfOfInfo;
 use crate::mgmtx::bucket_settings::BucketSettings;
+use crate::mgmtx::metakv2::{MetaKv2Revision, MetaKv2Write};
 use crate::mgmtx::node_target::NodeTarget;
 use crate::mgmtx::user::{Group, User};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -311,4 +313,54 @@ impl<'a> GetBucketStatsOptions<'a> {
         self.on_behalf_of_info = on_behalf_of.into();
         self
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct GetMetaKv2Options<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+    /// The absolute path of one leaf. Must not carry a trailing slash.
+    pub path: &'a str,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct GetMetaKv2DirOptions<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+    /// The absolute path of a directory. Must carry its trailing slash.
+    pub path: &'a str,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SetMetaKv2Options<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+    pub path: &'a str,
+    pub value: &'a str,
+    /// When given, the write is conditional on the key standing at this
+    /// revision. A stale revision is a conflict even when the write would
+    /// change nothing.
+    pub revision: Option<&'a MetaKv2Revision>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SetMetaKv2MultipleOptions<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+    /// The writes to commit, keyed by absolute path. All-or-nothing.
+    pub writes: &'a BTreeMap<String, MetaKv2Write>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct DeleteMetaKv2DirOptions<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+    /// The absolute path of a directory. Must carry its trailing slash.
+    pub path: &'a str,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SyncMetaKv2QuorumOptions<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
 }

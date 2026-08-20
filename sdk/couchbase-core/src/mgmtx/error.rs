@@ -178,7 +178,9 @@ impl ServerError {
 #[non_exhaustive]
 pub enum ServerErrorKind {
     AccessDenied,
-    UnsupportedFeature { feature: String },
+    UnsupportedFeature {
+        feature: String,
+    },
     ScopeExists,
     ScopeNotFound,
     CollectionExists,
@@ -186,13 +188,44 @@ pub enum ServerErrorKind {
     BucketExists,
     BucketNotFound,
     FlushDisabled,
-    ServerInvalidArg { arg: String, reason: String },
+    ServerInvalidArg {
+        arg: String,
+        reason: String,
+    },
     SampleAlreadyLoaded,
     InvalidSampleBucket,
     BucketUuidMismatch,
     UserNotFound,
     GroupNotFound,
     OperationDelayed,
+    /// A metakv2 key or directory does not exist. Also what a server without
+    /// the `/_metakv2` endpoint answers, because it 404s the whole URL.
+    MetaKvEntryNotFound,
+    /// A stale revision precondition, **or** a create over an existing key. The
+    /// server does not distinguish them — same status, same message, same body
+    /// naming one path — so the caller recovers the difference from its own
+    /// request.
+    ///
+    /// `current_revision` is absent when the named key does not exist, which is
+    /// what a revision supplied against an absent key produces.
+    MetaKvConflict {
+        path: String,
+        current_revision: Option<String>,
+    },
+    /// The store gave up retrying internally: HTTP 503, "Exceeded retries due
+    /// to conflicting updates".
+    ///
+    /// **Distinct from `MetaKvConflict`, and it has to be.** The seqno is one
+    /// cluster-global counter, so every commit in the cluster serializes
+    /// through the same chronicle log — writes to entirely unrelated keys
+    /// contend. Nothing was applied and the same commit is still valid, so the
+    /// recovery is to retry it with backoff rather than to rebase against a
+    /// version that never moved.
+    MetaKvContended,
+    MetaKvNotEmpty,
+    MetaKvTimeout,
+    MetaKvWrongType,
+    MetaKvExists,
     Unknown,
 }
 
@@ -219,6 +252,24 @@ impl Display for ServerErrorKind {
             ServerErrorKind::OperationDelayed => {
                 write!(f, "operation was delayed, but will continue")
             }
+            ServerErrorKind::MetaKvEntryNotFound => write!(f, "metakv entry not found"),
+            ServerErrorKind::MetaKvConflict {
+                path,
+                current_revision,
+            } => {
+                if let Some(revision) = current_revision {
+                    write!(f, "metakv conflict at {path}, now at revision {revision}")
+                } else {
+                    write!(f, "metakv conflict at {path}, which does not exist")
+                }
+            }
+            ServerErrorKind::MetaKvContended => {
+                write!(f, "metakv exceeded its retries due to conflicting updates")
+            }
+            ServerErrorKind::MetaKvNotEmpty => write!(f, "metakv directory not empty"),
+            ServerErrorKind::MetaKvTimeout => write!(f, "metakv timeout"),
+            ServerErrorKind::MetaKvWrongType => write!(f, "metakv wrong type"),
+            ServerErrorKind::MetaKvExists => write!(f, "metakv exists"),
             ServerErrorKind::SampleAlreadyLoaded => write!(f, "sample already loaded"),
             ServerErrorKind::InvalidSampleBucket => write!(f, "invalid sample bucket"),
             ServerErrorKind::Unknown => write!(f, "unknown error"),
@@ -352,6 +403,13 @@ impl MetricsName for ServerErrorKind {
             ServerErrorKind::UserNotFound => "mgmtx.UserNotFound",
             ServerErrorKind::GroupNotFound => "mgmtx.GroupNotFound",
             ServerErrorKind::OperationDelayed => "mgmtx.OperationDelayed",
+            ServerErrorKind::MetaKvEntryNotFound => "mgmtx.MetaKvEntryNotFound",
+            ServerErrorKind::MetaKvConflict { .. } => "mgmtx.MetaKvConflict",
+            ServerErrorKind::MetaKvContended => "mgmtx.MetaKvContended",
+            ServerErrorKind::MetaKvNotEmpty => "mgmtx.MetaKvNotEmpty",
+            ServerErrorKind::MetaKvTimeout => "mgmtx.MetaKvTimeout",
+            ServerErrorKind::MetaKvWrongType => "mgmtx.MetaKvWrongType",
+            ServerErrorKind::MetaKvExists => "mgmtx.MetaKvExists",
             ServerErrorKind::Unknown => "mgmtx._OTHER",
         }
     }

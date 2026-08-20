@@ -19,8 +19,10 @@
 use crate::httpx::request::OnBehalfOfInfo;
 use crate::mgmtx;
 use crate::mgmtx::bucket_settings::BucketSettings;
+use crate::mgmtx::metakv2::{MetaKv2Revision, MetaKv2Write};
 use crate::mgmtx::user::{Group, User};
 use crate::retry::{RetryStrategy, DEFAULT_RETRY_STRATEGY};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -1271,6 +1273,257 @@ impl<'a> From<&GetBucketStatsOptions<'a>> for mgmtx::options::GetBucketStatsOpti
     fn from(opts: &GetBucketStatsOptions<'a>) -> Self {
         Self {
             bucket_name: opts.bucket_name,
+            on_behalf_of_info: opts.on_behalf_of_info,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct GetMetaKv2Options<'a> {
+    /// The absolute path of one leaf. Must not carry a trailing slash — a leaf
+    /// read with one is a not-found on the server, so it is rejected here.
+    pub path: &'a str,
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl<'a> GetMetaKv2Options<'a> {
+    pub fn new(path: &'a str) -> Self {
+        Self {
+            path,
+            on_behalf_of_info: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of_info(mut self, on_behalf_of_info: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of_info = Some(on_behalf_of_info);
+        self
+    }
+}
+
+impl<'a> From<&GetMetaKv2Options<'a>> for mgmtx::options::GetMetaKv2Options<'a> {
+    fn from(opts: &GetMetaKv2Options<'a>) -> Self {
+        Self {
+            path: opts.path,
+            on_behalf_of_info: opts.on_behalf_of_info,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct GetMetaKv2DirOptions<'a> {
+    /// The absolute path of a directory. Must carry its trailing slash.
+    pub path: &'a str,
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl<'a> GetMetaKv2DirOptions<'a> {
+    pub fn new(path: &'a str) -> Self {
+        Self {
+            path,
+            on_behalf_of_info: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of_info(mut self, on_behalf_of_info: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of_info = Some(on_behalf_of_info);
+        self
+    }
+}
+
+impl<'a> From<&GetMetaKv2DirOptions<'a>> for mgmtx::options::GetMetaKv2DirOptions<'a> {
+    fn from(opts: &GetMetaKv2DirOptions<'a>) -> Self {
+        Self {
+            path: opts.path,
+            on_behalf_of_info: opts.on_behalf_of_info,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SetMetaKv2Options<'a> {
+    pub path: &'a str,
+    pub value: &'a str,
+    /// When given, the write is conditional on the key standing at this
+    /// revision. The precondition is checked before values are compared, so a
+    /// stale revision conflicts even when the write would change nothing.
+    pub revision: Option<&'a MetaKv2Revision>,
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl<'a> SetMetaKv2Options<'a> {
+    pub fn new(path: &'a str, value: &'a str) -> Self {
+        Self {
+            path,
+            value,
+            revision: None,
+            on_behalf_of_info: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn revision(mut self, revision: &'a MetaKv2Revision) -> Self {
+        self.revision = Some(revision);
+        self
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of_info(mut self, on_behalf_of_info: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of_info = Some(on_behalf_of_info);
+        self
+    }
+}
+
+impl<'a> From<&SetMetaKv2Options<'a>> for mgmtx::options::SetMetaKv2Options<'a> {
+    fn from(opts: &SetMetaKv2Options<'a>) -> Self {
+        Self {
+            path: opts.path,
+            value: opts.value,
+            revision: opts.revision,
+            on_behalf_of_info: opts.on_behalf_of_info,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SetMetaKv2MultipleOptions<'a> {
+    /// The writes to commit, keyed by absolute path. All-or-nothing: one stale
+    /// revision means nothing is applied.
+    pub writes: &'a BTreeMap<String, MetaKv2Write>,
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl<'a> SetMetaKv2MultipleOptions<'a> {
+    pub fn new(writes: &'a BTreeMap<String, MetaKv2Write>) -> Self {
+        Self {
+            writes,
+            on_behalf_of_info: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of_info(mut self, on_behalf_of_info: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of_info = Some(on_behalf_of_info);
+        self
+    }
+}
+
+impl<'a> From<&SetMetaKv2MultipleOptions<'a>> for mgmtx::options::SetMetaKv2MultipleOptions<'a> {
+    fn from(opts: &SetMetaKv2MultipleOptions<'a>) -> Self {
+        Self {
+            writes: opts.writes,
+            on_behalf_of_info: opts.on_behalf_of_info,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DeleteMetaKv2DirOptions<'a> {
+    /// The absolute path of a directory. Must carry its trailing slash.
+    pub path: &'a str,
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl<'a> DeleteMetaKv2DirOptions<'a> {
+    pub fn new(path: &'a str) -> Self {
+        Self {
+            path,
+            on_behalf_of_info: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of_info(mut self, on_behalf_of_info: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of_info = Some(on_behalf_of_info);
+        self
+    }
+}
+
+impl<'a> From<&DeleteMetaKv2DirOptions<'a>> for mgmtx::options::DeleteMetaKv2DirOptions<'a> {
+    fn from(opts: &DeleteMetaKv2DirOptions<'a>) -> Self {
+        Self {
+            path: opts.path,
+            on_behalf_of_info: opts.on_behalf_of_info,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SyncMetaKv2QuorumOptions<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl Default for SyncMetaKv2QuorumOptions<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> SyncMetaKv2QuorumOptions<'a> {
+    pub fn new() -> Self {
+        Self {
+            on_behalf_of_info: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+
+    pub fn on_behalf_of_info(mut self, on_behalf_of_info: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of_info = Some(on_behalf_of_info);
+        self
+    }
+}
+
+impl<'a> From<&SyncMetaKv2QuorumOptions<'a>> for mgmtx::options::SyncMetaKv2QuorumOptions<'a> {
+    fn from(opts: &SyncMetaKv2QuorumOptions<'a>) -> Self {
+        Self {
             on_behalf_of_info: opts.on_behalf_of_info,
         }
     }
