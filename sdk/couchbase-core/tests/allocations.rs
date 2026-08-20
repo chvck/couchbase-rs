@@ -95,10 +95,13 @@ fn upsert_against_new_collection() {
         )
         .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
 
+        // Same budget as `upsert` against the default collection: a warm
+        // fast-cache hit for a named collection now costs nothing over the
+        // shortcut that skips the resolver entirely.
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            14
-        } else {
             12
+        } else {
+            10
         };
 
         ensure_agent_ready(&agent).await;

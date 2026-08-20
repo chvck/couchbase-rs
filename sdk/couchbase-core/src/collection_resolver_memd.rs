@@ -70,5 +70,12 @@ where
         Ok((resp.collection_id, resp.manifest_rev))
     }
 
-    async fn invalidate_collection_id(&self, scope_name: &str, collection_name: &str) {}
+    async fn invalidate_collection_id(
+        &self,
+        _scope_name: &str,
+        _collection_name: &str,
+        _manifest_rev: u64,
+    ) {
+        // Nothing is cached here, so there is nothing to invalidate.
+    }
 }

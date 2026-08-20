@@ -17,7 +17,7 @@
  */
 
 use crate::error::{Error, Result};
-use crate::memdx::error::ServerErrorKind;
+use crate::memdx::error::{ServerError, ServerErrorKind};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -28,10 +28,18 @@ pub(crate) trait CollectionResolver: Sized + Send + Sync {
         collection_name: &str,
     ) -> impl Future<Output = Result<(u32, u64)>> + Send;
 
+    /// Drops any cached id for this collection.
+    ///
+    /// `manifest_rev` is the collection manifest revision the server answered
+    /// the refusal from, or 0 when it did not say. An implementation that
+    /// records the revision its entries were resolved at may use this to
+    /// decline: a node that is behind reports an older revision than the one
+    /// we resolved against, and the id it refused is not the id we hold.
     fn invalidate_collection_id(
         &self,
         scope_name: &str,
         collection_name: &str,
+        manifest_rev: u64,
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -84,8 +92,17 @@ where
             || memdx_err.is_server_error_kind(ServerErrorKind::UnknownCollectionName)
             || memdx_err.is_server_error_kind(ServerErrorKind::UnknownScopeName)
         {
+            // Parsed only here, on the error path, and only for the three
+            // statuses that mean the manifest moved under us -- the context is
+            // JSON, and every operation would otherwise pay for it.
+            let manifest_rev = memdx_err
+                .has_server_error_context()
+                .and_then(|context| ServerError::parse_context(context))
+                .and_then(|context| context.manifest_rev)
+                .unwrap_or(0);
+
             resolver
-                .invalidate_collection_id(scope_name, collection_name)
+                .invalidate_collection_id(scope_name, collection_name, manifest_rev)
                 .await;
         }
     }
