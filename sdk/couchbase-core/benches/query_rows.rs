@@ -22,6 +22,12 @@
 //! reqwest hands us — through the same decoder, scanner and row streamer a real
 //! response goes through. Each row shape is measured drained-and-dropped and
 //! drained-and-held, because only the held case can retain anything.
+//!
+//! **The study these entries belong to is `docs/row-streaming.md`** — what
+//! slicing rows out of their chunk bought (heap, not wall-clock), the 102.7x
+//! retention regression it nearly shipped, and the size threshold that bounds
+//! it. Read that for the conclusions; this file and `tests/row_retention.rs`
+//! are how they are reproduced.
 
 use std::time::Duration;
 

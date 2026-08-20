@@ -28,7 +28,8 @@ use couchbase_core::cbconfig::CollectionManifest;
 use couchbase_core::mgmtx::bucket_settings::{BucketSettings, BucketType, StorageBackend};
 use couchbase_core::options::management::{
     CreateBucketOptions, CreateCollectionOptions, DeleteBucketOptions, EnsureBucketOptions,
-    GetBucketOptions, GetCollectionManifestOptions, UpdateBucketOptions,
+    GetBucketOptions, GetCollectionManifestOptions, GetFullBucketConfigOptions,
+    GetFullClusterConfigOptions, UpdateBucketOptions,
 };
 use couchbase_core::{cbconfig, error};
 use serial_test::serial;
@@ -432,4 +433,44 @@ fn find_collection(
 async fn get_manifest(agent: &Agent, bucket_name: &str) -> error::Result<CollectionManifest> {
     let opts = &GetCollectionManifestOptions::new(bucket_name);
     agent.get_collection_manifest(opts).await
+}
+
+/// Ported from cbcore-rs `tests/integration.rs::test_mgmt_service`.
+///
+/// `get_full_cluster_config` and `get_full_bucket_config` are public API and
+/// were called by nothing — not a test, not another operation. They are the raw
+/// ns_server documents, so what they mostly pin is that the parse still matches
+/// what the server sends, and a parse nobody ever runs is a parse that has
+/// stopped matching without anyone noticing.
+#[test]
+fn the_raw_cluster_and_bucket_documents_still_parse() {
+    run_test(async |mut agent| {
+        let cluster = agent
+            .get_full_cluster_config(&GetFullClusterConfigOptions::new())
+            .await
+            .unwrap();
+
+        assert!(!cluster.nodes.is_empty(), "the cluster reported no nodes");
+        assert!(
+            cluster
+                .bucket_names
+                .iter()
+                .any(|b| b.bucket_name == agent.test_setup_config.bucket),
+            "the test bucket was not listed: {:?}",
+            cluster.bucket_names
+        );
+
+        let bucket_name = agent.test_setup_config.bucket.clone();
+        let bucket = agent
+            .get_full_bucket_config(&GetFullBucketConfigOptions::new(&bucket_name))
+            .await
+            .unwrap();
+
+        assert_eq!(Some(bucket_name.as_str()), bucket.name.as_deref());
+        assert!(!bucket.bucket_type.is_empty());
+        assert!(!bucket.storage_backend.is_empty());
+        assert!(bucket.uuid.is_some());
+        // The whole reason a KV client can route: the map and its vbucket count.
+        assert!(bucket.num_vbuckets.unwrap_or_default() > 0);
+    });
 }

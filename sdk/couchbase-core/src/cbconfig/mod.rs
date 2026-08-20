@@ -297,8 +297,13 @@ pub struct SystemStats {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct InterestingStats {
+    /// **The four rate fields are `f64`, not `u64`.** ns_server reports
+    /// `cmd_get`, `get_hits`, `ops` and `ep_bg_fetched` as per-second rates, so
+    /// on any cluster doing work they arrive as `0.7`, not `0`. Typed as `u64`
+    /// they failed the whole document — `get_full_cluster_config` could not
+    /// parse a busy cluster at all. Measured against 8.0.3.
     #[serde(default)]
-    pub cmd_get: Option<u64>,
+    pub cmd_get: Option<f64>,
     #[serde(default)]
     pub couch_docs_actual_disk_size: Option<u64>,
     #[serde(default)]
@@ -316,9 +321,9 @@ pub struct InterestingStats {
     #[serde(default)]
     pub curr_items_tot: Option<u64>,
     #[serde(default)]
-    pub ep_bg_fetched: Option<u64>,
+    pub ep_bg_fetched: Option<f64>,
     #[serde(default)]
-    pub get_hits: Option<u64>,
+    pub get_hits: Option<f64>,
     #[serde(default)]
     pub index_data_size: Option<u64>,
     #[serde(default)]
@@ -326,7 +331,7 @@ pub struct InterestingStats {
     #[serde(default)]
     pub mem_used: Option<u64>,
     #[serde(default)]
-    pub ops: Option<u64>,
+    pub ops: Option<f64>,
     #[serde(default)]
     pub vb_active_num_non_resident: Option<u64>,
     #[serde(default)]
@@ -361,8 +366,9 @@ pub struct BucketStatsUris {
 pub struct BucketBasicStats {
     #[serde(rename = "quotaPercentUsed", default)]
     pub quota_percent_used: Option<f64>,
+    /// A rate, so `f64` — 8.0 reports `60.1`, and `u64` failed the document.
     #[serde(rename = "opsPerSec", default)]
-    pub ops_per_sec: Option<u64>,
+    pub ops_per_sec: Option<f64>,
     #[serde(rename = "diskFetches", default)]
     pub disk_fetches: Option<u64>,
     #[serde(rename = "itemCount", default)]
@@ -428,8 +434,12 @@ pub struct FullBucketConfig {
     #[serde(rename = "autoCompactionSettings", default)]
     pub auto_compaction_settings: Option<bool>,
 
-    #[serde(rename = "replicaIndex")]
-    pub replica_index: bool,
+    /// **Optional, and absent rather than false.** A magma or ephemeral bucket
+    /// has no replica index and 8.0 omits the field entirely, which made the
+    /// whole document fail to parse when it was a bare `bool`. `BucketSettings`
+    /// has always had it as `Option<bool>` for the same field.
+    #[serde(rename = "replicaIndex", default)]
+    pub replica_index: Option<bool>,
 
     pub quota: FullBucketQuota,
 

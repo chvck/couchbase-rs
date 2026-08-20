@@ -43,6 +43,35 @@ cargo test
 
 For a full list of available environment variables, see the [Testing Environment Variables](https://github.com/couchbaselabs/couchbase-rs/blob/main/sdk/couchbase/tests/common/test_config.rs).
 
+### What the cluster has to look like
+
+CI provisions its cluster with `cbdinocluster` and creates the `default` bucket at a **100 MB** RAM
+quota (`.github/workflows/tests.yml`). A cluster set up by hand often differs in two ways that each
+fail a group of tests for reasons that look nothing like their cause:
+
+- **The bucket management tests create buckets, so the cluster needs quota headroom.** If `default`
+  has been given a large quota, it can consume the cluster's entire KV allocation, and every test
+  that creates a bucket fails with `RAM quota specified is too large to be provisioned into this
+  cluster` — 17 tests across `couchbase-core`'s `bucket_management` and `mgmt` and `couchbase`'s
+  `search`. Either keep `default` small, as CI does, or raise the cluster's KV quota:
+
+  ```
+  curl -u USER:PASS -X POST http://HOST:8091/pools/default -d 'memoryQuota=6144'
+  ```
+
+- **A magma bucket defaults new collections to history retention on.** The collection tests assert
+  that a freshly created collection has history *off*, so on a magma `default` with
+  `historyRetentionCollectionDefault` true, three tests fail on that assertion:
+
+  ```
+  curl -u USER:PASS -X POST http://HOST:8091/pools/default/buckets/default \
+       -d 'historyRetentionCollectionDefault=false'
+  ```
+
+Leftover state from other suites also matters: a user created without a display name, or an index
+sharing a name with one under test in another scope, have both caused failures here. Prefer a
+cluster you can throw away.
+
 ### Test coverage
 
 Whilst some integration tests are included in the main SDK crate, more extensive tests are run via the Couchbase FIT tool.
