@@ -18,6 +18,7 @@
 
 use crate::error;
 use crate::mutationtoken::MutationToken;
+use bytes::Bytes;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -117,7 +118,8 @@ pub struct DecrementResult {
 #[derive(Debug)]
 pub struct SubDocResult {
     pub err: Option<error::MemdxError>,
-    pub value: Option<Vec<u8>>,
+    /// A view into the response frame's own buffer, not a copy of it.
+    pub value: Option<Bytes>,
 }
 
 #[derive(Debug)]

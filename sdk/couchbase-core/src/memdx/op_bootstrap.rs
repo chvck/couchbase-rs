@@ -450,9 +450,12 @@ mod tests {
 
             state.round_trips += 1;
             for (sender, packet) in state.in_flight.drain(..) {
-                sender
-                    .try_send(Ok(ClientResponse::new(packet, None)))
-                    .expect("the caller's receiver should be waiting for exactly one response");
+                assert!(
+                    sender
+                        .try_send(Ok(ClientResponse::new(packet, None)))
+                        .is_none(),
+                    "the caller's receiver should be waiting for exactly one response",
+                );
             }
 
             true
@@ -472,7 +475,7 @@ mod tests {
         ) -> Result<ClientPendingOp> {
             let opaque = self.next_opaque.fetch_add(1, Ordering::SeqCst);
             let response = self.reply_to(&packet, opaque);
-            let (sender, receiver) = mpsc::channel(1);
+            let (sender, receiver) = ResponseSender::new_pair(is_persistent);
 
             {
                 let mut state = self.state.lock().unwrap();
@@ -484,7 +487,6 @@ mod tests {
                 opaque,
                 Arc::new(Mutex::new(OpaqueMap::default())),
                 receiver,
-                is_persistent,
             ))
         }
 

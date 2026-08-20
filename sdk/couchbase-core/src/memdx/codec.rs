@@ -48,12 +48,21 @@ impl Decoder for KeyValueCodec {
             }
         } as usize;
 
-        if buf_len < (HEADER_SIZE + total_body_len) {
-            buf.reserve(HEADER_SIZE + total_body_len);
+        let frame_len = HEADER_SIZE + total_body_len;
+
+        if buf_len < frame_len {
+            // `reserve` asks for capacity for that many bytes *beyond* what the
+            // buffer already holds, so asking for the whole frame length
+            // over-asked by the prefix already received -- which on a partial
+            // frame is exactly the bytes we are waiting to complete. The buffer
+            // then grew to twice the frame it was given, and never shrinks, so a
+            // connection that once saw a large document held twice its size for
+            // as long as it lived.
+            buf.reserve(frame_len - buf_len);
             return Ok(None);
         }
 
-        let mut slice = buf.split_to(HEADER_SIZE + total_body_len);
+        let mut slice = buf.split_to(frame_len);
 
         // 0
         let magic = Magic::try_from(slice.get_u8())?;
@@ -112,6 +121,19 @@ impl Decoder for KeyValueCodec {
         };
 
         Ok(Some(packet))
+    }
+}
+
+impl KeyValueCodec {
+    /// Encode one request straight into `dst`.
+    ///
+    /// The connection's writer is a task of its own, and a `RequestPacket` borrows the
+    /// caller's key and value, so the request is encoded on the dispatching task and it is
+    /// the bytes that cross the channel to the writer. `Encoder` below is still where the
+    /// encoding lives; this is the way in that does not need a `FramedWrite` wrapped
+    /// around the socket to reach it.
+    pub(crate) fn encode_request(packet: RequestPacket, dst: &mut BytesMut) -> Result<(), Error> {
+        KeyValueCodec::default().encode(packet, dst)
     }
 }
 

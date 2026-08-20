@@ -676,6 +676,7 @@ fn take_uleb_prefixed(data: &mut Bytes) -> Result<Bytes> {
 // Dispatch
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy)]
 pub struct OpsRangeScan {
     pub ext_frames_enabled: bool,
 }

@@ -28,7 +28,7 @@ use crate::memdx::pendingop::StandardPendingOp;
 use crate::memdx::request::{GetCollectionIdRequest, PingRequest, StatsRequest};
 use crate::memdx::response::{GetCollectionIdResponse, PingResponse, StatsResponse};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct OpsUtil {
     pub ext_frames_enabled: bool,
 }

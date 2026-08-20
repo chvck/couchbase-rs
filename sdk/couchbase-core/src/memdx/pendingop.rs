@@ -16,14 +16,14 @@
  *
  */
 
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::Receiver;
 use tokio::time::{timeout_at, Instant};
 
-use crate::memdx::client::{OpaqueMap, SenderContext};
+use crate::memdx::client::{OpaqueMap, ResponseReceiver, SenderContext};
 use crate::memdx::client_response::ClientResponse;
 use crate::memdx::error::CancellationErrorKind;
 use crate::memdx::error::{Error, Result};
@@ -31,10 +31,9 @@ use crate::memdx::response::TryFromClientResponse;
 
 pub struct ClientPendingOp {
     opaque: u32,
-    response_receiver: Receiver<Result<ClientResponse>>,
+    receiver: ResponseReceiver,
     opaque_map: Arc<Mutex<OpaqueMap>>,
 
-    is_persistent: bool,
     completed: AtomicBool,
 }
 
@@ -42,30 +41,53 @@ impl ClientPendingOp {
     pub(crate) fn new(
         opaque: u32,
         opaque_map: Arc<Mutex<OpaqueMap>>,
-        response_receiver: Receiver<Result<ClientResponse>>,
-        is_persistent: bool,
+        receiver: ResponseReceiver,
     ) -> Self {
         ClientPendingOp {
             opaque,
             opaque_map,
-            response_receiver,
-            is_persistent,
+            receiver,
             completed: AtomicBool::new(false),
         }
     }
 
     pub async fn recv(&mut self) -> Result<ClientResponse> {
-        match self.response_receiver.recv().await {
-            Some(r) => {
-                if !self.is_persistent {
-                    self.completed.store(true, Ordering::SeqCst);
-                }
+        match &mut self.receiver {
+            ResponseReceiver::OneShot(slot) => {
+                let Some(receiver) = slot.as_mut() else {
+                    // The single reply has already been read.
+                    return Err(Error::new_cancelled_error(
+                        CancellationErrorKind::RequestCancelled,
+                    ));
+                };
 
-                r
+                // Polled through a `&mut`, never moved out of the slot: `recv` has to
+                // survive being dropped mid-await by a `timeout_at` and then called again,
+                // and taking the receiver first would lose it on that path.
+                let received = poll_fn(|cx| Pin::new(&mut *receiver).poll(cx)).await;
+
+                // tokio's one-shot receiver panics if it is polled after completing, so it
+                // goes now that it has.
+                *slot = None;
+                self.completed.store(true, Ordering::SeqCst);
+
+                match received {
+                    Ok(response) => response,
+                    // The sender was dropped without answering, which only happens once the
+                    // client is gone.
+                    Err(_) => Err(Error::new_cancelled_error(
+                        CancellationErrorKind::RequestCancelled,
+                    )),
+                }
             }
-            None => Err(Error::new_cancelled_error(
-                CancellationErrorKind::RequestCancelled,
-            )),
+            // A persistent operation is never `completed`: more replies may follow every
+            // one that arrives, and it is the caller dropping the op that ends it.
+            ResponseReceiver::Streaming(receiver) => match receiver.recv().await {
+                Some(response) => response,
+                None => Err(Error::new_cancelled_error(
+                    CancellationErrorKind::RequestCancelled,
+                )),
+            },
         }
     }
 
@@ -73,12 +95,12 @@ impl ClientPendingOp {
         let context = self.cancel_op();
 
         if let Some(context) = context {
-            let sender = &context.sender;
-
-            sender
+            // Delivered to ourselves -- we still hold the receiver -- because a caller that
+            // cancels on a deadline reads the cancellation back out through `recv`.
+            let _ = context
+                .sender
                 .send(Err(Error::new_cancelled_error(e)))
-                .await
-                .unwrap();
+                .await;
 
             true
         } else {

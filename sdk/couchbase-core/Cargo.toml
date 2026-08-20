@@ -114,3 +114,7 @@ harness = false
 [[bench]]
 name = "agent"
 harness = false
+
+[[bench]]
+name = "kv_pipeline"
+harness = false

@@ -630,9 +630,15 @@ where
 
     fn update_last_activity(&self) {
         self.last_activity_timestamp_micros
-            .store(Utc::now().timestamp_micros(), Ordering::SeqCst);
+            .store(Utc::now().timestamp_micros(), Ordering::Relaxed);
     }
 
+    /// Errors raised on the way to the wire.
+    ///
+    /// A write failure is no longer one of them: the connection's writer is a task, so a
+    /// failed write is reported to the operation that was queued, not returned from
+    /// `dispatch`. What still arrives here is a request that could not be encoded, or one
+    /// dispatched onto a connection whose writer has already stopped.
     async fn handle_dispatch_side_result<T>(&self, result: memdx::error::Result<T>) -> KvResult<T> {
         match result {
             Ok(v) => Ok(v),
@@ -653,6 +659,14 @@ where
         match result {
             Ok(v) => Ok(v),
             Err(e) => {
+                // A write that failed is answered on this side now, and it means what it
+                // has always meant: this connection is finished. Closing it here is what
+                // stops the retry above from being handed the same dying client back.
+                if let memdx::error::ErrorKind::Dispatch { .. } = e.kind() {
+                    debug!("Client {} closing due to dispatch error", &self.id);
+                    let _ = self.close().await;
+                }
+
                 if let memdx::error::ErrorKind::Server(se) = e.kind() {
                     if se.kind() == &memdx::error::ServerErrorKind::AuthStale {
                         info!("Client {} closing due to auth stale status", &self.id);
@@ -687,23 +701,14 @@ where
     }
 
     fn ops_util(&self) -> OpsUtil {
-        OpsUtil {
-            ext_frames_enabled: self.has_feature(HelloFeature::AltRequests),
-        }
+        self.negotiated_ops_util()
     }
 
     fn ops_rangescan(&self) -> OpsRangeScan {
-        OpsRangeScan {
-            ext_frames_enabled: self.has_feature(HelloFeature::AltRequests),
-        }
+        self.negotiated_ops_rangescan()
     }
 
     fn ops_crud(&self) -> OpsCrud {
-        OpsCrud {
-            collections_enabled: self.has_feature(HelloFeature::Collections),
-            durability_enabled: self.has_feature(HelloFeature::SyncReplication),
-            preserve_expiry_enabled: self.has_feature(HelloFeature::PreserveExpiry),
-            ext_frames_enabled: self.has_feature(HelloFeature::AltRequests),
-        }
+        self.negotiated_ops_crud()
     }
 }

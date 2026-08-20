@@ -22,8 +22,12 @@ use crate::common::helpers::{
 use crate::common::test_agent::TestAgent;
 use crate::common::test_config::run_test;
 use couchbase_core::features::BucketFeature;
+use couchbase_core::memdx::durability_level::DurabilityLevel;
 use couchbase_core::memdx::ops_rangescan::{RangeScanCreateRangeScanConfig, RangeScanItemIter};
-use couchbase_core::options::crud::{AddOptions, GetOptions, ReplaceOptions, UpsertOptions};
+use couchbase_core::memdx::subdoc::{LookupInOp, LookupInOpType};
+use couchbase_core::options::crud::{
+    AddOptions, GetOptions, LookupInOptions, ReplaceOptions, UpsertOptions,
+};
 use couchbase_core::options::management::CreateCollectionOptions;
 use couchbase_core::options::query::QueryOptions;
 use couchbase_core::options::rangescan::{
@@ -46,10 +50,27 @@ mod common;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+/// Silences the test logger before it initialises, for this binary only.
+///
+/// The shared harness defaults to `TRACE` when `RUST_LOG` is unset, and memdx
+/// logs two records per round trip at roughly four allocations each -- so about
+/// eight of every count below was `chrono` formatting a timestamp, and the
+/// budgets measured the logger more than the client. Worse, they measured
+/// whichever of the two the ambient environment picked: the same tree passed
+/// with `RUST_LOG` unset and failed every case with it set.
+///
+/// Every test calls this first. The logger initialises once per process, on
+/// whichever test runs first, so setting it here is enough.
+#[cfg(feature = "dhat-heap")]
+fn measure_the_client_not_the_logger() {
+    std::env::set_var("RUST_LOG", "off");
+}
+
 #[serial]
 #[cfg(feature = "dhat-heap")]
 #[test]
 fn upsert() {
+    measure_the_client_not_the_logger();
     run_test(async |mut agent| {
         let key = generate_key();
         let value = generate_bytes_value(32);
@@ -59,9 +80,9 @@ fn upsert() {
         let upsert_opts = UpsertOptions::new(key_clone.as_slice(), "", "", value_clone.as_slice())
             .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            12
+            3
         } else {
-            10
+            1
         };
 
         ensure_agent_ready(&agent).await;
@@ -79,6 +100,7 @@ fn upsert() {
 #[cfg(feature = "dhat-heap")]
 #[test]
 fn upsert_against_new_collection() {
+    measure_the_client_not_the_logger();
     run_test(async |mut agent| {
         let key = generate_key();
         let value = generate_bytes_value(32);
@@ -110,9 +132,9 @@ fn upsert_against_new_collection() {
         // fast-cache hit for a named collection now costs nothing over the
         // shortcut that skips the resolver entirely.
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            12
+            3
         } else {
-            10
+            1
         };
 
         ensure_agent_ready(&agent).await;
@@ -130,6 +152,7 @@ fn upsert_against_new_collection() {
 #[cfg(feature = "dhat-heap")]
 #[test]
 fn add() {
+    measure_the_client_not_the_logger();
     run_test(async |mut agent| {
         let keys: Vec<Vec<u8>> = (0..WARMUP_RUNS + MEASURED_RUNS)
             .map(|_| generate_key())
@@ -139,9 +162,9 @@ fn add() {
             Arc::new(FailFastRetryStrategy::default());
 
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            12
+            3
         } else {
-            10
+            1
         };
 
         ensure_agent_ready(&agent).await;
@@ -159,6 +182,7 @@ fn add() {
 #[cfg(feature = "dhat-heap")]
 #[test]
 fn replace() {
+    measure_the_client_not_the_logger();
     run_test(async |mut agent| {
         let key = generate_key();
         let value = generate_bytes_value(32);
@@ -168,9 +192,9 @@ fn replace() {
         let opts = ReplaceOptions::new(key_clone.as_slice(), "", "", value_clone.as_slice())
             .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            12
+            3
         } else {
-            10
+            1
         };
 
         ensure_agent_ready(&agent).await;
@@ -188,6 +212,7 @@ fn replace() {
 #[cfg(feature = "dhat-heap")]
 #[test]
 fn get() {
+    measure_the_client_not_the_logger();
     run_test(async |mut agent| {
         let key = generate_key();
         let value = generate_bytes_value(32);
@@ -197,9 +222,9 @@ fn get() {
             .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
 
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            13
+            4
         } else {
-            11
+            2
         };
 
         ensure_agent_ready(&agent).await;
@@ -217,6 +242,7 @@ fn get() {
 #[cfg(feature = "dhat-heap")]
 #[test]
 fn query() {
+    measure_the_client_not_the_logger();
     run_test(async |mut agent| {
         let opts = QueryOptions::default()
             .statement("SELECT 1=1".to_string())
@@ -226,9 +252,9 @@ fn query() {
         // this pins the request encode plus the row and metadata decode of a
         // single-row response.
         let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
-            225
+            197
         } else {
-            222
+            194
         };
 
         ensure_query_ready(&agent).await;
@@ -239,6 +265,100 @@ fn query() {
                 row.unwrap();
             }
             res.metadata().unwrap();
+        })
+        .await
+    });
+}
+
+/// **A durable mutation's durability frame does not touch the heap.**
+///
+/// The frame is one byte for the level and two more for a timeout. It used to be
+/// built with `vec![level]` -- capacity exactly one -- and then pushed twice, so
+/// three bytes cost an allocation plus up to two reallocations, on every
+/// mutation that asked for durability. Nothing pinned that, which is why it
+/// survived: the plain `upsert` case above never sets a durability level.
+#[serial]
+#[cfg(feature = "dhat-heap")]
+#[test]
+fn durable_upsert() {
+    measure_the_client_not_the_logger();
+    run_test(async |mut agent| {
+        let key = generate_key();
+        let value = generate_bytes_value(32);
+        let key_clone = key.clone();
+        let value_clone = value.clone();
+
+        let opts = UpsertOptions::new(key_clone.as_slice(), "", "", value_clone.as_slice())
+            .durability_level(DurabilityLevel::MAJORITY)
+            .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
+
+        // The same budget as a plain upsert: asking for durability adds a frame
+        // extra, and a frame extra is not a reason to allocate.
+        //
+        // This covers the level-only frame, which is the only one reachable:
+        // `crudcomponent` passes `durability_level_timeout: None` at all five of
+        // its mutation sites and no option sets it, so the three-byte
+        // level-and-timeout frame cannot be built through the Agent at all.
+        let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
+            3
+        } else {
+            1
+        };
+
+        ensure_agent_ready(&agent).await;
+
+        create_doc(key, value, "", &agent).await;
+
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, _run| {
+            agent.upsert(opts.clone()).await.unwrap();
+        })
+        .await
+    });
+}
+
+/// **A subdoc lookup costs nothing per path, on the way out or on the way back.**
+///
+/// `lookup_in` used to build a `Vec<Vec<u8>>` of `path.to_vec()` and then copy
+/// each one into the request body four lines later, so an N-path lookup made N
+/// allocations to hold bytes it already borrowed, plus one more for a
+/// single-byte extras block. Decode then did the mirror image of that: a
+/// `vec![0; len]` and a `read_exact` per result, copying values out of a frame
+/// that is already a refcounted `Bytes`. Both sides are views now, so the count
+/// below is flat in the number of paths. Three paths are used here rather than
+/// one so that a per-path cost cannot hide in a fixed one; two of them return a
+/// value and the third is an `Exists`, which returns none.
+#[serial]
+#[cfg(feature = "dhat-heap")]
+#[test]
+fn lookup_in_three_paths() {
+    measure_the_client_not_the_logger();
+    run_test(async |mut agent| {
+        let key = generate_key();
+        let key_clone = key.clone();
+
+        let ops = [
+            LookupInOp::new(LookupInOpType::Get, b"a"),
+            LookupInOp::new(LookupInOpType::Get, b"b"),
+            LookupInOp::new(LookupInOpType::Exists, b"c"),
+        ];
+
+        let opts = LookupInOptions::new(key_clone.as_slice(), "", "", &ops)
+            .retry_strategy(Arc::new(FailFastRetryStrategy::default()));
+
+        // Nothing per path, in either direction. What remains is the request
+        // body, which is genuinely sized at run time, and the `Vec` of results.
+        let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
+            6
+        } else {
+            4
+        };
+
+        ensure_agent_ready(&agent).await;
+
+        create_doc(key, br#"{"a":1,"b":2,"c":3}"#.to_vec(), "", &agent).await;
+
+        run_allocation_test(agent, expected_allocs, async |agent: &TestAgent, _run| {
+            agent.lookup_in(opts.clone()).await.unwrap();
         })
         .await
     });
@@ -305,20 +425,16 @@ fn vbucket_for(key: &[u8], num_vbuckets: usize) -> u16 {
 /// without owned `String`s, and the continue's 28-byte extras block lives on the
 /// stack. Undo either and this test moves.
 ///
-/// **`SCAN_ALLOCS` is 32, not 8, because the logger is inside the measurement.**
-/// This harness runs at its default level, which is `TRACE`, and every budget in
-/// this file is pinned with the log records in it. One record costs 4
-/// allocations — three growing the `chrono` timestamp, one growing the formatted
-/// line — and a round trip writes two, one for the request and one for the
-/// response, so three round trips carry 24. `RUST_LOG=off` takes this test to 8,
-/// `upsert` to 2 and `get` to 3; the gate is therefore run with `RUST_LOG`
-/// unset, and 8 is the figure to compare with cbcore-rs's 7.0: two per round
-/// trip for the dispatch channel, one for the create's body, one for the
-/// bucket-feature check.
+/// `SCAN_ALLOCS` is 6, against cbcore-rs's measured 7.0. The create and the
+/// cancel answer once each and correlate through a one-shot that does not
+/// allocate; the continue answers with a stream and still pays for its channel.
+/// The other two are the create's JSON body and the bucket-feature check. See [`measure_the_client_not_the_logger`] for
+/// why it used to read 32.
 #[serial]
 #[cfg(feature = "dhat-heap")]
 #[test]
 fn range_scan() {
+    measure_the_client_not_the_logger();
     run_test(async |agent| {
         if !feature_supported(&agent, BucketFeature::RangeScan).await {
             eprintln!("  skipped: the bucket does not support range scan");
@@ -449,8 +565,8 @@ fn range_scan() {
              this is a deliberate improvement, lower SCAN_ALLOCS; if it is a \
              regression, look first at the create's JSON body and the \
              continue's extras block, which are the two terms deliberately \
-             kept off the heap. If it is 8, the log level is not this \
-             harness's default and 24 of the expected number is the logger.",
+             kept off the heap. If it is 32, the logger is inside the \
+             measurement and this binary failed to silence it.",
             small_min,
             expected_allocs
         );
@@ -558,13 +674,13 @@ const WARMUP_RUNS: usize = 100;
 /// What a create, one bounded continue and a cancel allocate, measured.
 ///
 /// 8 in the client and 24 in the logger, which this harness measures at its
-/// default `TRACE` level along with every other budget here.
+/// the logger silenced, along with every other budget here.
 ///
 /// **Lowering this is a change to the assertion, not a failure.** See
 /// [`range_scan`] for what the number is made of and which parts of it are this
 /// crate's to spend.
 #[cfg(feature = "dhat-heap")]
-const SCAN_ALLOCS: u64 = 32;
+const SCAN_ALLOCS: u64 = 6;
 
 /// Round trips in one measured scan run: the create, the continue, the cancel.
 ///

@@ -19,6 +19,7 @@
 use crate::memdx::error;
 use crate::memdx::opcode::OpCode;
 use bitflags::bitflags;
+use bytes::Bytes;
 
 pub trait SubdocOp {
     fn is_xattr_op(&self) -> bool;
@@ -55,7 +56,8 @@ pub struct SubdocRequestInfo {
 #[derive(Debug)]
 pub struct SubDocResult {
     pub err: Option<error::Error>,
-    pub value: Option<Vec<u8>>,
+    /// A view into the response frame's own buffer, not a copy of it.
+    pub value: Option<Bytes>,
 }
 
 #[derive(Clone, Debug, Copy, Eq, PartialEq)]

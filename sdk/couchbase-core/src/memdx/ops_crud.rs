@@ -47,7 +47,7 @@ use std::time::Duration;
 const MAX_KEY_SIZE: usize = 250;
 const MAX_KEY_SIZE_USING_COLLECTIONS: usize = 246;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct OpsCrud {
     pub collections_enabled: bool,
     pub durability_enabled: bool,
@@ -750,20 +750,16 @@ impl OpsCrud {
         let key = self.encode_collection_and_key(request.collection_id, request.key, buf)?;
 
         let len_ops = request.ops.len();
-        let mut path_bytes_list: Vec<Vec<u8>> = vec![vec![]; len_ops];
-        let mut path_bytes_total = 0;
-
-        for (i, op) in request.ops.iter().enumerate() {
-            let path_bytes = op.path.to_vec();
-            path_bytes_total += path_bytes.len();
-            path_bytes_list[i] = path_bytes;
-        }
+        // `op.path` is already borrowed for as long as the request, so the paths
+        // are written straight out of it. Copying each one into a `Vec` first
+        // cost an allocation per path to produce bytes that were read once, four
+        // lines later, and copied again.
+        let path_bytes_total: usize = request.ops.iter().map(|op| op.path.len()).sum();
 
         let mut value_buf: Vec<u8> = vec![0; len_ops * 4 + path_bytes_total];
         let mut value_iter = 0;
-        for (i, op) in request.ops.iter().enumerate() {
-            let path_bytes = &path_bytes_list[i];
-            let path_bytes_len = path_bytes.len();
+        for op in request.ops.iter() {
+            let path_bytes_len = op.path.len();
 
             value_buf[value_iter] = Into::<OpCode>::into(op.op).into();
             value_buf[value_iter + 1] = op.flags.bits();
@@ -771,15 +767,20 @@ impl OpsCrud {
                 &mut value_buf[value_iter + 2..value_iter + 4],
                 path_bytes_len as u16,
             );
-            value_buf[value_iter + 4..value_iter + 4 + path_bytes_len].copy_from_slice(path_bytes);
+            value_buf[value_iter + 4..value_iter + 4 + path_bytes_len].copy_from_slice(op.path);
             value_iter += 4 + path_bytes_len;
         }
 
-        let mut extra_buf = Vec::with_capacity(8);
-
-        if !request.flags.is_empty() {
-            extra_buf.push(request.flags.bits());
-        }
+        // At most one byte, so it does not need the heap -- `mutate_in` below
+        // already uses a stack array for the same job.
+        let mut extra_buf = [0u8; 1];
+        let extras_len = if request.flags.is_empty() {
+            0
+        } else {
+            extra_buf[0] = request.flags.bits();
+            1
+        };
+        let extra_buf = &extra_buf[..extras_len];
 
         let packet = RequestPacket {
             magic,
@@ -787,7 +788,7 @@ impl OpsCrud {
             datatype: 0,
             vbucket_id: Some(request.vbucket_id),
             cas: None,
-            extras: Some(&extra_buf),
+            extras: Some(extra_buf),
             key: Some(key),
             value: Some(&value_buf),
             framing_extras,
@@ -845,23 +846,17 @@ impl OpsCrud {
         let key = self.encode_collection_and_key(request.collection_id, request.key, buf)?;
 
         let len_ops = request.ops.len();
-        let mut path_bytes_list: Vec<Vec<u8>> = vec![vec![]; len_ops];
-        let mut path_bytes_total = 0;
-        let mut value_bytes_total = 0;
-
-        for (i, op) in request.ops.iter().enumerate() {
-            let path_bytes = op.path.to_vec();
-            path_bytes_total += path_bytes.len();
-            path_bytes_list[i] = path_bytes;
-            value_bytes_total += op.value.len();
-        }
+        // Written straight out of the borrowed `op.path`, as in `lookup_in`: the
+        // intermediate `Vec` per path was an allocation to hold bytes that were
+        // read once and copied on.
+        let path_bytes_total: usize = request.ops.iter().map(|op| op.path.len()).sum();
+        let value_bytes_total: usize = request.ops.iter().map(|op| op.value.len()).sum();
 
         let mut value_buf: Vec<u8> = vec![0; len_ops * 8 + path_bytes_total + value_bytes_total];
         let mut value_iter = 0;
 
-        for (i, op) in request.ops.iter().enumerate() {
-            let path_bytes = &path_bytes_list[i];
-            let path_bytes_len = path_bytes.len();
+        for op in request.ops.iter() {
+            let path_bytes_len = op.path.len();
             let value_bytes_len = op.value.len();
 
             value_buf[value_iter] = Into::<OpCode>::into(op.op).into();
@@ -874,7 +869,7 @@ impl OpsCrud {
                 &mut value_buf[value_iter + 4..value_iter + 8],
                 value_bytes_len as u32,
             );
-            value_buf[value_iter + 8..value_iter + 8 + path_bytes_len].copy_from_slice(path_bytes);
+            value_buf[value_iter + 8..value_iter + 8 + path_bytes_len].copy_from_slice(op.path);
             value_buf[value_iter + 8 + path_bytes_len
                 ..value_iter + 8 + path_bytes_len + value_bytes_len]
                 .copy_from_slice(op.value);
@@ -993,9 +988,15 @@ impl OpsCrud {
                 ));
             }
 
-            let dura_buf = extframe::encode_durability_ext_frame(dura, durability_timeout)?;
+            let (dura_buf, dura_len) =
+                extframe::encode_durability_ext_frame(dura, durability_timeout)?;
 
-            extframe::append_ext_frame(ExtReqFrameCode::Durability, &dura_buf, buf, &mut offset)?;
+            extframe::append_ext_frame(
+                ExtReqFrameCode::Durability,
+                &dura_buf[..dura_len],
+                buf,
+                &mut offset,
+            )?;
         } else if durability_timeout.is_some() {
             return Err(Error::new_invalid_argument_error(
                 "cannot encode durability timeout without durability level",

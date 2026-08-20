@@ -16,7 +16,7 @@
  *
  */
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -1209,10 +1209,11 @@ impl TryFromClientResponse for LookupInResponse {
                 return Err(Error::new_protocol_error("bad value length"));
             }
 
-            let value = if res_value_len > 0 {
-                let mut tmp_val = vec![0; res_value_len as usize];
-                cursor.read_exact(&mut tmp_val)?;
-                Some(tmp_val)
+            let res_value = if res_value_len > 0 {
+                let start = cursor.position() as usize;
+                let end = start + res_value_len as usize;
+                cursor.set_position(end as u64);
+                Some(value.slice(start..end))
             } else {
                 None
             };
@@ -1241,7 +1242,10 @@ impl TryFromClientResponse for LookupInResponse {
                 .into()
             });
 
-            results.push(SubDocResult { value, err });
+            results.push(SubDocResult {
+                value: res_value,
+                err,
+            });
             op_index += 1;
         }
 
@@ -1412,14 +1416,19 @@ impl TryFromClientResponse for MutateInResponse {
                 let op_status = Status::from(op_status);
 
                 if op_status == Status::Success {
-                    let val_length = cursor.read_u32::<BigEndian>()?;
+                    let val_length = cursor.read_u32::<BigEndian>()? as usize;
 
-                    let mut value = vec![0; val_length as usize];
-                    cursor.read_exact(&mut value)?;
+                    if cursor.remaining() < val_length {
+                        return Err(Error::new_protocol_error("bad value length"));
+                    }
+
+                    let start = cursor.position() as usize;
+                    let end = start + val_length;
+                    cursor.set_position(end as u64);
 
                     results.push(SubDocResult {
                         err: None,
-                        value: Some(value),
+                        value: Some(value.slice(start..end)),
                     });
                 } else {
                     return Err(Error::new_protocol_error(

@@ -30,6 +30,9 @@ use crate::memdx::dispatcher::{
 use crate::memdx::hello_feature::HelloFeature;
 use crate::memdx::op_auth_saslauto::{Credentials, SASLAuthAutoOptions};
 use crate::memdx::op_bootstrap::BootstrapOptions;
+use crate::memdx::ops_crud::OpsCrud;
+use crate::memdx::ops_rangescan::OpsRangeScan;
+use crate::memdx::ops_util::OpsUtil;
 use crate::memdx::packet::ResponsePacket;
 use crate::memdx::request::{GetErrorMapRequest, HelloRequest, SelectBucketRequest};
 use crate::service_type::ServiceType;
@@ -140,6 +143,14 @@ pub(crate) struct StdKvClient<D: Dispatcher> {
 
     supported_features: Vec<HelloFeature>,
 
+    // Derived from `supported_features` once, after bootstrap, for the same
+    // reason as the address strings above: these were rebuilt on every one of
+    // the 16 CRUD entry points, and each field was a linear scan of a ~20-entry
+    // Vec that has not changed since the connection said hello.
+    ops_crud: OpsCrud,
+    ops_util: OpsUtil,
+    ops_rangescan: OpsRangeScan,
+
     pub(crate) selected_bucket: std::sync::Mutex<Option<String>>,
 
     pub(crate) last_activity_timestamp_micros: AtomicI64,
@@ -155,6 +166,39 @@ where
 {
     pub fn client(&self) -> &D {
         &self.cli
+    }
+
+    /// Reads the negotiated feature list once and keeps what the encoders need.
+    ///
+    /// Called after hello answers and before the client is shared, so these
+    /// cannot go stale: `supported_features` is never written again.
+    fn cache_negotiated_features(&mut self) {
+        let ext_frames_enabled = self.supported_features.contains(&HelloFeature::AltRequests);
+
+        self.ops_crud = OpsCrud {
+            collections_enabled: self.supported_features.contains(&HelloFeature::Collections),
+            durability_enabled: self
+                .supported_features
+                .contains(&HelloFeature::SyncReplication),
+            preserve_expiry_enabled: self
+                .supported_features
+                .contains(&HelloFeature::PreserveExpiry),
+            ext_frames_enabled,
+        };
+        self.ops_util = OpsUtil { ext_frames_enabled };
+        self.ops_rangescan = OpsRangeScan { ext_frames_enabled };
+    }
+
+    pub(crate) fn negotiated_ops_crud(&self) -> OpsCrud {
+        self.ops_crud
+    }
+
+    pub(crate) fn negotiated_ops_util(&self) -> OpsUtil {
+        self.ops_util
+    }
+
+    pub(crate) fn negotiated_ops_rangescan(&self) -> OpsRangeScan {
+        self.ops_rangescan
     }
 }
 
@@ -386,6 +430,19 @@ where
             closed,
             on_close_tx: opts.on_close_tx,
             supported_features: vec![],
+            // Recomputed below, once hello has answered.
+            ops_crud: OpsCrud {
+                collections_enabled: false,
+                durability_enabled: false,
+                preserve_expiry_enabled: false,
+                ext_frames_enabled: false,
+            },
+            ops_util: OpsUtil {
+                ext_frames_enabled: false,
+            },
+            ops_rangescan: OpsRangeScan {
+                ext_frames_enabled: false,
+            },
             selected_bucket: std::sync::Mutex::new(None),
             id: id.clone(),
             last_activity_timestamp_micros: AtomicI64::new(Utc::now().timestamp_micros()),
@@ -420,6 +477,7 @@ where
             if let Some(hello) = res.hello {
                 info!("Enabled hello features: {:?}", &hello.enabled_features);
                 kv_cli.supported_features = hello.enabled_features;
+                kv_cli.cache_negotiated_features();
             }
 
             if let Some(handler) = opts.bootstrap_options.on_err_map_fetched {

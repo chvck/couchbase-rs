@@ -592,7 +592,7 @@ fn test_mutate_in() {
         assert!(mutate_in_result.value[0]
             .value
             .as_ref()
-            .is_some_and(|val| String::from_utf8(val.clone()).unwrap() == "5"));
+            .is_some_and(|val| val.as_ref() == b"5"));
         assert!(mutate_in_result.value[1].err.is_none());
         assert!(mutate_in_result.value[1].value.is_none());
         assert!(mutate_in_result.value[2].err.is_none());

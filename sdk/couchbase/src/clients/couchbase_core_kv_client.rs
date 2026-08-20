@@ -650,7 +650,7 @@ impl CouchbaseCoreKvClient {
         for (i, x) in result.value.into_iter().enumerate() {
             let original_idx = op_indexes[i];
             entries[original_idx] = Some(LookupInResultEntry {
-                value: x.value.as_ref().map(|v| bytes::Bytes::from(v.clone())),
+                value: x.value,
                 error: x.err.as_ref().map(|e| e.into()),
                 op: ordered_specs[i].op.clone(),
             });
@@ -709,9 +709,7 @@ impl CouchbaseCoreKvClient {
 
         for (i, x) in result.value.into_iter().enumerate() {
             let original_idx = op_indexes[i];
-            entries[original_idx] = Some(MutateInResultEntry {
-                value: x.value.as_ref().map(|v| bytes::Bytes::from(v.clone())),
-            });
+            entries[original_idx] = Some(MutateInResultEntry { value: x.value });
         }
 
         Ok(MutateInResult {

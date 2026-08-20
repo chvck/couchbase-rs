@@ -215,12 +215,21 @@ pub fn make_uleb128_32(collection_id: u32, buf: &mut [u8]) -> usize {
     count
 }
 
+/// The durability frame body: one byte for the level, plus two for a timeout.
+///
+/// Returned in a stack array rather than a `Vec` because it is at most three
+/// bytes and every durable mutation encodes one. The `Vec` form allocated with
+/// capacity exactly 1 and then pushed twice, so a three-byte frame cost an
+/// allocation and up to two reallocations.
 pub fn encode_durability_ext_frame(
     level: DurabilityLevel,
     timeout: Option<Duration>,
-) -> error::Result<Vec<u8>> {
+) -> error::Result<([u8; 3], usize)> {
+    let mut buf = [0u8; 3];
+    buf[0] = level.into();
+
     if timeout.is_none() {
-        return Ok(vec![level.into()]);
+        return Ok((buf, 1));
     }
 
     let timeout = timeout.unwrap();
@@ -237,11 +246,10 @@ pub fn encode_durability_ext_frame(
         timeout_millis = 1;
     }
 
-    let mut buf = vec![level.into()];
-    buf.put_u8((timeout_millis >> 8) as u8);
-    buf.put_u8(timeout_millis as u8);
+    buf[1] = (timeout_millis >> 8) as u8;
+    buf[2] = timeout_millis as u8;
 
-    Ok(buf)
+    Ok((buf, 3))
 }
 
 pub(crate) fn decode_server_duration_ext_frame(mut data: &[u8]) -> error::Result<Duration> {
@@ -257,16 +265,21 @@ pub(crate) fn decode_server_duration_ext_frame(mut data: &[u8]) -> error::Result
     Ok(Duration::from_micros(dura_micros as u64))
 }
 
+/// Reads a durability frame body back.
+///
+/// Takes a slice: it used to take `&mut Vec<u8>` and consume the body with
+/// `remove(0)`, which forced the caller to own and hand over a heap buffer to
+/// read three bytes out of.
 pub(crate) fn decode_durability_level_ext_frame(
-    data: &mut Vec<u8>,
+    data: &[u8],
 ) -> error::Result<DurabilityLevelSettings> {
     if data.len() == 1 {
-        let durability = DurabilityLevel::from(data.remove(0));
+        let durability = DurabilityLevel::from(data[0]);
 
         return Ok(DurabilityLevelSettings::new(durability));
     } else if data.len() == 3 {
-        let durability = DurabilityLevel::from(data.remove(0));
-        let timeout_millis = ((data.remove(0) as u32) << 8) | (data.remove(0) as u32);
+        let durability = DurabilityLevel::from(data[0]);
+        let timeout_millis = ((data[1] as u32) << 8) | (data[2] as u32);
 
         return Ok(DurabilityLevelSettings::new_with_timeout(
             durability,
@@ -291,11 +304,10 @@ mod tests {
         expected_bytes: &[u8],
     ) {
         let d = d.into();
-        let data = encode_durability_ext_frame(l, d).expect("encode failed");
-        assert_eq!(data, expected_bytes);
+        let (data, len) = encode_durability_ext_frame(l, d).expect("encode failed");
+        assert_eq!(&data[..len], expected_bytes);
 
-        let mut data_clone = data.clone();
-        let settings = decode_durability_level_ext_frame(&mut data_clone).expect("decode failed");
+        let settings = decode_durability_level_ext_frame(&data[..len]).expect("decode failed");
         assert_eq!(settings.durability_level, l);
 
         let decoded_timeout = settings.timeout.unwrap_or(Duration::from_millis(0));
