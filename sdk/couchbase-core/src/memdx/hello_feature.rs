@@ -112,3 +112,101 @@ impl From<u16> for HelloFeature {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hand-written tables in both directions, so a test walks both. See
+    // `opcode.rs` for the drift this catches.
+    const ALL: &[HelloFeature] = &[
+        HelloFeature::DataType,
+        HelloFeature::Tls,
+        HelloFeature::TCPNoDelay,
+        HelloFeature::SeqNo,
+        HelloFeature::TCPDelay,
+        HelloFeature::Xattr,
+        HelloFeature::Xerror,
+        HelloFeature::SelectBucket,
+        HelloFeature::Snappy,
+        HelloFeature::SnappyEverywhere,
+        HelloFeature::Json,
+        HelloFeature::Duplex,
+        HelloFeature::ClusterMapNotif,
+        HelloFeature::UnorderedExec,
+        HelloFeature::Durations,
+        HelloFeature::AltRequests,
+        HelloFeature::SyncReplication,
+        HelloFeature::Collections,
+        HelloFeature::PreserveExpiry,
+        HelloFeature::PointInTimeRecovery,
+        HelloFeature::CreateAsDeleted,
+        HelloFeature::ReplaceBodyWithXattr,
+        HelloFeature::ClusterMapKnownVersion,
+        HelloFeature::DedupeNotMyVbucketClustermap,
+        HelloFeature::ClusterMapChangeNotificationBrief,
+    ];
+
+    #[test]
+    fn all_lists_every_named_variant() {
+        for feature in ALL.iter().copied() {
+            // Exhaustive on purpose: no wildcard arm, so a new variant stops
+            // this compiling until it is named here, and the list it belongs in
+            // is the one directly above.
+            match feature {
+                HelloFeature::DataType
+                | HelloFeature::Tls
+                | HelloFeature::TCPNoDelay
+                | HelloFeature::SeqNo
+                | HelloFeature::TCPDelay
+                | HelloFeature::Xattr
+                | HelloFeature::Xerror
+                | HelloFeature::SelectBucket
+                | HelloFeature::Snappy
+                | HelloFeature::SnappyEverywhere
+                | HelloFeature::Json
+                | HelloFeature::Duplex
+                | HelloFeature::ClusterMapNotif
+                | HelloFeature::UnorderedExec
+                | HelloFeature::Durations
+                | HelloFeature::AltRequests
+                | HelloFeature::SyncReplication
+                | HelloFeature::Collections
+                | HelloFeature::PreserveExpiry
+                | HelloFeature::PointInTimeRecovery
+                | HelloFeature::CreateAsDeleted
+                | HelloFeature::ReplaceBodyWithXattr
+                | HelloFeature::ClusterMapKnownVersion
+                | HelloFeature::DedupeNotMyVbucketClustermap
+                | HelloFeature::ClusterMapChangeNotificationBrief => {}
+                HelloFeature::Unknown(code) => {
+                    panic!("ALL holds named variants only, found Unknown({code:#06x})")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_named_variant_decodes_back() {
+        for feature in ALL.iter().copied() {
+            let code = u16::from(feature);
+            let decoded = HelloFeature::from(code);
+            assert_eq!(
+                decoded, feature,
+                "{feature:?} encodes to {code:#06x}, but {code:#06x} decodes to {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_code_re_encodes_to_itself() {
+        for code in 0..=u16::MAX {
+            let feature = HelloFeature::from(code);
+            let encoded = u16::from(feature);
+            assert_eq!(
+                encoded, code,
+                "{code:#06x} decodes to {feature:?}, which encodes back to {encoded:#06x}"
+            );
+        }
+    }
+}

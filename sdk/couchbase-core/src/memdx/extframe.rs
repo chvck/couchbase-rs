@@ -92,16 +92,27 @@ pub fn decode_ext_frame(buf: &[u8]) -> error::Result<(ExtResFrameCode, &[u8], us
     Ok((frame_code, frame_body, buf_pos))
 }
 
-fn iter_ext_frames(buf: &[u8], mut cb: impl FnMut(ExtResFrameCode, &[u8])) -> error::Result<&[u8]> {
-    if !buf.is_empty() {
-        let (frame_code, frame_body, buf_pos) = decode_ext_frame(buf)?;
+/// Calls `cb` once for every extras frame in `buf`.
+///
+/// A response may carry several: ReadUnits, WriteUnits and ThrottleDuration all
+/// travel in the same block as ServerDuration, and nothing orders them. Stopping
+/// after the first meant a response that led with any of the others reported no
+/// server duration at all -- which feeds every KV response and the orphan
+/// reporter.
+fn iter_ext_frames(buf: &[u8], mut cb: impl FnMut(ExtResFrameCode, &[u8])) -> error::Result<()> {
+    let mut rest = buf;
+
+    while !rest.is_empty() {
+        let (frame_code, frame_body, buf_pos) = decode_ext_frame(rest)?;
 
         cb(frame_code, frame_body);
 
-        return Ok(&buf[buf_pos..]);
+        // decode_ext_frame rejects an empty buffer and every frame carries a
+        // header byte, so buf_pos is always positive and this terminates.
+        rest = &rest[buf_pos..];
     }
 
-    Ok(buf)
+    Ok(())
 }
 
 pub fn append_ext_frame(
@@ -135,14 +146,16 @@ pub fn append_ext_frame(
         }
         buf[hdr_byte_ptr] |= 0xF0;
 
-        if *offset + 2 > buf.len() {
+        if *offset + 1 > buf.len() {
             return Err(Error::new_invalid_argument_error(
                 "buffer overflow",
                 "ext frame".to_string(),
             ));
         }
-        buf[*offset..*offset + 2].copy_from_slice(&(u_frame_code.to_be_bytes()));
-        *offset += 2;
+        // One byte, matching `decode_ext_frame` and the protocol: the escape
+        // nibble is followed by a single byte that is added to it.
+        buf[*offset] = (u_frame_code - 15) as u8;
+        *offset += 1;
     }
 
     if frame_len < 15 {
@@ -155,14 +168,17 @@ pub fn append_ext_frame(
             ));
         }
         buf[hdr_byte_ptr] |= 0x0F;
-        if *offset + 2 > buf.len() {
+        if *offset + 1 > buf.len() {
             return Err(Error::new_invalid_argument_error(
                 "buffer overflow",
                 "ext frame".to_string(),
             ));
         }
-        buf[*offset..*offset + 2].copy_from_slice(&((frame_len - 15) as u16).to_be_bytes());
-        *offset += 2;
+        // One byte, as above. Reachable: an on-behalf-of username of fifteen
+        // bytes or more takes this branch, and two bytes here put the first
+        // character of the username where the server reads a length.
+        buf[*offset] = (frame_len - 15) as u8;
+        *offset += 1;
     }
 
     if frame_len > 0 {
@@ -372,5 +388,205 @@ mod tests {
         .unwrap();
 
         assert_eq!(&buf[..offset], &[19, 1, 0, 1]);
+    }
+
+    /// A response extras block holding a ReadUnits frame and then a
+    /// ServerDuration frame -- an ordering the server is free to use, and which
+    /// used to hide the duration entirely because only the first frame was read.
+    /// Hand-built rather than encoded, to stay honest about what is on the wire:
+    /// the header byte is a nibble of frame code and a nibble of body length.
+    fn read_units_then_server_duration() -> Vec<u8> {
+        // ReadUnits is 0x01 with a 2-byte body, ServerDuration 0x00 with a
+        // 2-byte body.
+        vec![0x12, 0x00, 0x05, 0x02, 0x00, 0x64]
+    }
+
+    #[test]
+    fn a_server_duration_on_its_own_is_found() {
+        assert!(decode_res_ext_frames(&[0x02, 0x00, 0x64])
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn frames_without_a_duration_report_none_rather_than_failing() {
+        assert!(decode_res_ext_frames(&[0x12, 0x00, 0x05])
+            .unwrap()
+            .is_none());
+    }
+
+    /// Ported from cbcore-rs `src/memdx/serverduration.rs::basic`, decode half.
+    ///
+    /// The pairs are cbcore-rs's, which reads the same wire field; the unit
+    /// here is microseconds rather than nanoseconds, which is what the server
+    /// actually sends and what gocbcore reads. Only the decode direction ports:
+    /// this crate has no encoder for the field.
+    ///
+    /// The tolerance is one part per million because the arithmetic is `f32`
+    /// where cbcore-rs's is `f64`; the largest pair differs by 13 µs out of
+    /// 120 s, which is mantissa precision, not a formula difference.
+    #[test]
+    fn server_durations_decode_from_their_encoded_form() {
+        for (encoded, expected_micros) in [
+            (0x0000u16, 0u64),
+            (0x0001, 1),
+            (0x0127, 9_919),
+            (0xd8da, 89_997_489),
+            (0xe664, 99_999_149),
+            (0xf35d, 109_999_659),
+            (0xffff, 120_125_043),
+        ] {
+            let got = decode_server_duration_ext_frame(&encoded.to_be_bytes())
+                .expect("decode failed")
+                .as_micros() as u64;
+
+            let tolerance = std::cmp::max(1, expected_micros / 1_000_000);
+            assert!(
+                got.abs_diff(expected_micros) <= tolerance,
+                "encoded {encoded:#06x}: got {got} µs, expected {expected_micros} µs"
+            );
+        }
+    }
+
+    /// A wrong-length body is refused rather than read past.
+    #[test]
+    fn a_server_duration_of_the_wrong_length_is_refused() {
+        assert!(decode_server_duration_ext_frame(&[]).is_err());
+        assert!(decode_server_duration_ext_frame(&[0x01]).is_err());
+        assert!(decode_server_duration_ext_frame(&[0x01, 0x27, 0x00]).is_err());
+    }
+
+    /// **The server may order its response frames as it likes.** A server
+    /// duration behind a read-units frame used to be dropped, because the
+    /// walk decoded exactly one frame and the remainder was thrown away.
+    #[test]
+    fn a_server_duration_behind_another_frame_is_still_found() {
+        // ReadUnits (code 0x01, 2 bytes), then ServerDuration (code 0x00, 2 bytes).
+        let buf = [0x12u8, 0x00, 0x0a, 0x02, 0x01, 0x27];
+
+        let duration = decode_res_ext_frames(&buf)
+            .expect("decode failed")
+            .expect("no server duration found");
+        assert_eq!(duration.as_micros(), 9_919);
+
+        // ...and in the order the single-frame walk happened to handle.
+        let buf = [0x02u8, 0x01, 0x27, 0x12, 0x00, 0x0a];
+        assert_eq!(
+            decode_res_ext_frames(&buf).unwrap().unwrap().as_micros(),
+            9_919
+        );
+    }
+
+    /// A response carrying no server duration reads as `None`, not as zero.
+    #[test]
+    fn frames_without_a_server_duration_yield_none() {
+        assert!(decode_res_ext_frames(&[]).unwrap().is_none());
+        assert!(decode_res_ext_frames(&[0x12, 0x00, 0x0a])
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn no_frames_means_no_duration() {
+        assert!(decode_res_ext_frames(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn every_frame_is_visited_not_just_the_first() {
+        let mut seen = Vec::new();
+
+        iter_ext_frames(&read_units_then_server_duration(), |code, _| {
+            seen.push(code)
+        })
+        .unwrap();
+
+        assert_eq!(
+            seen,
+            vec![ExtResFrameCode::ReadUnits, ExtResFrameCode::ServerDuration]
+        );
+    }
+    /// Ported from cbcore-rs `src/memdx/frame_extras.rs::basic`, encode half:
+    /// four request frames written into one buffer, read back in order.
+    ///
+    /// cbcore-rs round-trips these through its own request-frame reader. There
+    /// is no request-frame decoder here — `decode_ext_frame` yields
+    /// `ExtResFrameCode`, a different namespace — so the read-back walks the
+    /// bytes and checks the code numbers and bodies rather than typed frames.
+    #[test]
+    fn several_request_frames_append_in_order() {
+        let mut buf = [0u8; 128];
+        let mut offset = 0;
+
+        append_ext_frame(
+            ExtReqFrameCode::OnBehalfOf,
+            b"user-1",
+            &mut buf,
+            &mut offset,
+        )
+        .unwrap();
+        append_ext_frame(ExtReqFrameCode::PreserveTTL, &[], &mut buf, &mut offset).unwrap();
+        append_ext_frame(
+            ExtReqFrameCode::OnBehalfOf,
+            b"user-2",
+            &mut buf,
+            &mut offset,
+        )
+        .unwrap();
+        append_ext_frame(ExtReqFrameCode::PreserveTTL, &[], &mut buf, &mut offset).unwrap();
+
+        assert_eq!(
+            &buf[..offset],
+            &[
+                0x46, b'u', b's', b'e', b'r', b'-', b'1', // on-behalf-of, 6 bytes
+                0x50, // preserve-ttl, no body
+                0x46, b'u', b's', b'e', b'r', b'-', b'2', //
+                0x50,
+            ]
+        );
+
+        let mut rest = &buf[..offset];
+        let mut seen: Vec<(u16, Vec<u8>)> = vec![];
+        while !rest.is_empty() {
+            let (code, body, used) = decode_ext_frame(rest).unwrap();
+            seen.push((code.into(), body.to_vec()));
+            rest = &rest[used..];
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                (0x04, b"user-1".to_vec()),
+                (0x05, vec![]),
+                (0x04, b"user-2".to_vec()),
+                (0x05, vec![]),
+            ]
+        );
+    }
+
+    /// A body of fifteen bytes or more escapes its length into **one** extra
+    /// byte, which is what `decode_ext_frame` and the server both read.
+    ///
+    /// Reachable in production: an on-behalf-of username this long is ordinary.
+    /// Two bytes here put the username's first character where the length's
+    /// continuation is read, so the frame — and every frame after it — is
+    /// misparsed.
+    #[test]
+    fn a_long_frame_body_escapes_its_length_into_one_byte() {
+        let user = b"a-user-with-a-long-name";
+        assert!(user.len() >= 15);
+
+        let mut buf = [0u8; 128];
+        let mut offset = 0;
+        append_ext_frame(ExtReqFrameCode::OnBehalfOf, user, &mut buf, &mut offset).unwrap();
+
+        // Header, one length-escape byte, then the body.
+        assert_eq!(offset, 2 + user.len());
+        assert_eq!(buf[0], 0x4F);
+        assert_eq!(buf[1], (user.len() - 15) as u8);
+
+        let (code, body, used) = decode_ext_frame(&buf[..offset]).unwrap();
+        assert_eq!(u16::from(code), 0x04);
+        assert_eq!(body, user);
+        assert_eq!(used, offset);
     }
 }

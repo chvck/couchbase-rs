@@ -143,6 +143,7 @@ impl TryFrom<u8> for OpCode {
             0x89 => OpCode::SelectBucket,
             0x94 => OpCode::GetLocked,
             0x95 => OpCode::UnlockKey,
+            0xa0 => OpCode::GetMeta,
             0xb5 => OpCode::GetClusterConfig,
             0xbb => OpCode::GetCollectionId,
             0xc5 => OpCode::SubDocGet,
@@ -221,5 +222,138 @@ impl Display for OpCode {
             }
         };
         write!(f, "{txt}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The two tables above are written out by hand in opposite directions, so
+    // nothing but a test keeps them agreeing: `GetMeta` was encodable as 0xa0
+    // for a long time while 0xa0 decoded to `Unknown(0xa0)`.
+    const ALL: &[OpCode] = &[
+        OpCode::Get,
+        OpCode::Set,
+        OpCode::Add,
+        OpCode::Replace,
+        OpCode::Delete,
+        OpCode::Increment,
+        OpCode::Decrement,
+        OpCode::Noop,
+        OpCode::Stat,
+        OpCode::Touch,
+        OpCode::GAT,
+        OpCode::Append,
+        OpCode::Prepend,
+        OpCode::Hello,
+        OpCode::GetClusterConfig,
+        OpCode::GetCollectionId,
+        OpCode::SubDocGet,
+        OpCode::SubDocExists,
+        OpCode::SubDocDictAdd,
+        OpCode::SubDocDictSet,
+        OpCode::SubDocDelete,
+        OpCode::SubDocReplace,
+        OpCode::SubDocArrayPushLast,
+        OpCode::SubDocArrayPushFirst,
+        OpCode::SubDocArrayInsert,
+        OpCode::SubDocArrayAddUnique,
+        OpCode::SubDocCounter,
+        OpCode::SubDocMultiLookup,
+        OpCode::SubDocMultiMutation,
+        OpCode::SubDocGetCount,
+        OpCode::SubDocReplaceBodyWithXattr,
+        OpCode::RangeScanCreate,
+        OpCode::RangeScanContinue,
+        OpCode::RangeScanCancel,
+        OpCode::GetErrorMap,
+        OpCode::SelectBucket,
+        OpCode::GetLocked,
+        OpCode::UnlockKey,
+        OpCode::GetMeta,
+        OpCode::SASLAuth,
+        OpCode::SASLListMechs,
+        OpCode::SASLStep,
+    ];
+
+    #[test]
+    fn all_lists_every_named_variant() {
+        for op in ALL.iter().copied() {
+            // Exhaustive on purpose: no wildcard arm, so a new variant stops
+            // this compiling until it is named here, and the list it belongs in
+            // is the one directly above.
+            match op {
+                OpCode::Get
+                | OpCode::Set
+                | OpCode::Add
+                | OpCode::Replace
+                | OpCode::Delete
+                | OpCode::Increment
+                | OpCode::Decrement
+                | OpCode::Noop
+                | OpCode::Stat
+                | OpCode::Touch
+                | OpCode::GAT
+                | OpCode::Append
+                | OpCode::Prepend
+                | OpCode::Hello
+                | OpCode::GetClusterConfig
+                | OpCode::GetCollectionId
+                | OpCode::SubDocGet
+                | OpCode::SubDocExists
+                | OpCode::SubDocDictAdd
+                | OpCode::SubDocDictSet
+                | OpCode::SubDocDelete
+                | OpCode::SubDocReplace
+                | OpCode::SubDocArrayPushLast
+                | OpCode::SubDocArrayPushFirst
+                | OpCode::SubDocArrayInsert
+                | OpCode::SubDocArrayAddUnique
+                | OpCode::SubDocCounter
+                | OpCode::SubDocMultiLookup
+                | OpCode::SubDocMultiMutation
+                | OpCode::SubDocGetCount
+                | OpCode::SubDocReplaceBodyWithXattr
+                | OpCode::RangeScanCreate
+                | OpCode::RangeScanContinue
+                | OpCode::RangeScanCancel
+                | OpCode::GetErrorMap
+                | OpCode::SelectBucket
+                | OpCode::GetLocked
+                | OpCode::UnlockKey
+                | OpCode::GetMeta
+                | OpCode::SASLAuth
+                | OpCode::SASLListMechs
+                | OpCode::SASLStep => {}
+                OpCode::Unknown(code) => {
+                    panic!("ALL holds named variants only, found Unknown({code:#04x})")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_named_variant_decodes_back() {
+        for op in ALL.iter().copied() {
+            let code = u8::from(op);
+            let decoded = OpCode::try_from(code).unwrap();
+            assert_eq!(
+                decoded, op,
+                "{op:?} encodes to {code:#04x}, but {code:#04x} decodes to {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_code_re_encodes_to_itself() {
+        for code in 0..=u8::MAX {
+            let op = OpCode::try_from(code).unwrap();
+            let encoded = u8::from(op);
+            assert_eq!(
+                encoded, code,
+                "{code:#04x} decodes to {op:?}, which encodes back to {encoded:#04x}"
+            );
+        }
     }
 }

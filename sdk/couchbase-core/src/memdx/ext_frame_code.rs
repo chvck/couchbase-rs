@@ -81,3 +81,60 @@ impl From<u16> for ExtResFrameCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Only the response codes are decoded -- request codes are encode-only, so
+    // there is no second table to drift from. See `opcode.rs` for the drift
+    // this catches.
+    const ALL_RES: &[ExtResFrameCode] = &[
+        ExtResFrameCode::ServerDuration,
+        ExtResFrameCode::ReadUnits,
+        ExtResFrameCode::WriteUnits,
+        ExtResFrameCode::ThrottleDuration,
+    ];
+
+    #[test]
+    fn all_res_lists_every_named_variant() {
+        for frame_code in ALL_RES.iter().copied() {
+            // Exhaustive on purpose: no wildcard arm, so a new variant stops
+            // this compiling until it is named here, and the list it belongs in
+            // is the one directly above.
+            match frame_code {
+                ExtResFrameCode::ServerDuration
+                | ExtResFrameCode::ReadUnits
+                | ExtResFrameCode::WriteUnits
+                | ExtResFrameCode::ThrottleDuration => {}
+                ExtResFrameCode::Unknown(code) => {
+                    panic!("ALL_RES holds named variants only, found Unknown({code:#06x})")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_named_res_variant_decodes_back() {
+        for frame_code in ALL_RES.iter().copied() {
+            let code = u16::from(frame_code);
+            let decoded = ExtResFrameCode::from(code);
+            assert_eq!(
+                decoded, frame_code,
+                "{frame_code:?} encodes to {code:#06x}, but {code:#06x} decodes to {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_res_code_re_encodes_to_itself() {
+        for code in 0..=u16::MAX {
+            let frame_code = ExtResFrameCode::from(code);
+            let encoded = u16::from(frame_code);
+            assert_eq!(
+                encoded, code,
+                "{code:#06x} decodes to {frame_code:?}, which encodes back to {encoded:#06x}"
+            );
+        }
+    }
+}

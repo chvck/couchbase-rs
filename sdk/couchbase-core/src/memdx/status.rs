@@ -431,3 +431,193 @@ impl Display for Status {
         write!(f, "{txt}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hand-written tables in both directions, so a test walks both. See
+    // `opcode.rs` for the drift this catches.
+    const ALL: &[Status] = &[
+        Status::Success,
+        Status::KeyNotFound,
+        Status::KeyExists,
+        Status::TooBig,
+        Status::InvalidArgs,
+        Status::NotStored,
+        Status::BadDelta,
+        Status::NotMyVbucket,
+        Status::NoBucket,
+        Status::Locked,
+        Status::OpaqueNoMatch,
+        Status::WouldThrottle,
+        Status::ConfigOnly,
+        Status::NotLocked,
+        Status::AuthStale,
+        Status::AuthError,
+        Status::AuthContinue,
+        Status::RangeError,
+        Status::AccessError,
+        Status::NotInitialized,
+        Status::RateLimitedNetworkIngress,
+        Status::RateLimitedNetworkEgress,
+        Status::RateLimitedMaxConnections,
+        Status::RateLimitedMaxCommands,
+        Status::RateLimitedScopeSizeLimitExceeded,
+        Status::CommandUnknown,
+        Status::OutOfMemory,
+        Status::NotSupported,
+        Status::InternalError,
+        Status::Busy,
+        Status::TmpFail,
+        Status::CollectionUnknown,
+        Status::ScopeUnknown,
+        Status::DurabilityInvalidLevel,
+        Status::DurabilityImpossible,
+        Status::SyncWriteInProgress,
+        Status::SyncWriteAmbiguous,
+        Status::SyncWriteRecommitInProgress,
+        Status::RangeScanCancelled,
+        Status::RangeScanMore,
+        Status::RangeScanComplete,
+        Status::RangeScanVBUUIDNotEqual,
+        Status::SubDocPathNotFound,
+        Status::SubDocPathMismatch,
+        Status::SubDocPathInvalid,
+        Status::SubDocPathTooBig,
+        Status::SubDocDocTooDeep,
+        Status::SubDocCantInsert,
+        Status::SubDocNotJSON,
+        Status::SubDocBadRange,
+        Status::SubDocBadDelta,
+        Status::SubDocPathExists,
+        Status::SubDocValueTooDeep,
+        Status::SubDocInvalidCombo,
+        Status::SubDocMultiPathFailure,
+        Status::SubDocSuccessDeleted,
+        Status::SubDocXattrInvalidFlagCombo,
+        Status::SubDocXattrInvalidKeyCombo,
+        Status::SubDocXattrUnknownMacro,
+        Status::SubDocXattrUnknownVAttr,
+        Status::SubDocXattrCannotModifyVAttr,
+        Status::SubDocMultiPathFailureDeleted,
+        Status::SubDocInvalidXattrOrder,
+        Status::SubDocXattrUnknownVattrMacro,
+        Status::SubDocCanOnlyReviveDeletedDocuments,
+        Status::SubDocDeletedDocumentCantHaveValue,
+    ];
+
+    #[test]
+    fn all_lists_every_named_variant() {
+        for status in ALL.iter().copied() {
+            // Exhaustive on purpose: no wildcard arm, so a new variant stops
+            // this compiling until it is named here, and the list it belongs in
+            // is the one directly above.
+            match status {
+                Status::Success
+                | Status::KeyNotFound
+                | Status::KeyExists
+                | Status::TooBig
+                | Status::InvalidArgs
+                | Status::NotStored
+                | Status::BadDelta
+                | Status::NotMyVbucket
+                | Status::NoBucket
+                | Status::Locked
+                | Status::OpaqueNoMatch
+                | Status::WouldThrottle
+                | Status::ConfigOnly
+                | Status::NotLocked
+                | Status::AuthStale
+                | Status::AuthError
+                | Status::AuthContinue
+                | Status::RangeError
+                | Status::AccessError
+                | Status::NotInitialized
+                | Status::RateLimitedNetworkIngress
+                | Status::RateLimitedNetworkEgress
+                | Status::RateLimitedMaxConnections
+                | Status::RateLimitedMaxCommands
+                | Status::RateLimitedScopeSizeLimitExceeded
+                | Status::CommandUnknown
+                | Status::OutOfMemory
+                | Status::NotSupported
+                | Status::InternalError
+                | Status::Busy
+                | Status::TmpFail
+                | Status::CollectionUnknown
+                | Status::ScopeUnknown
+                | Status::DurabilityInvalidLevel
+                | Status::DurabilityImpossible
+                | Status::SyncWriteInProgress
+                | Status::SyncWriteAmbiguous
+                | Status::SyncWriteRecommitInProgress
+                | Status::RangeScanCancelled
+                | Status::RangeScanMore
+                | Status::RangeScanComplete
+                | Status::RangeScanVBUUIDNotEqual
+                | Status::SubDocPathNotFound
+                | Status::SubDocPathMismatch
+                | Status::SubDocPathInvalid
+                | Status::SubDocPathTooBig
+                | Status::SubDocDocTooDeep
+                | Status::SubDocCantInsert
+                | Status::SubDocNotJSON
+                | Status::SubDocBadRange
+                | Status::SubDocBadDelta
+                | Status::SubDocPathExists
+                | Status::SubDocValueTooDeep
+                | Status::SubDocInvalidCombo
+                | Status::SubDocMultiPathFailure
+                | Status::SubDocSuccessDeleted
+                | Status::SubDocXattrInvalidFlagCombo
+                | Status::SubDocXattrInvalidKeyCombo
+                | Status::SubDocXattrUnknownMacro
+                | Status::SubDocXattrUnknownVAttr
+                | Status::SubDocXattrCannotModifyVAttr
+                | Status::SubDocMultiPathFailureDeleted
+                | Status::SubDocInvalidXattrOrder
+                | Status::SubDocXattrUnknownVattrMacro
+                | Status::SubDocCanOnlyReviveDeletedDocuments
+                | Status::SubDocDeletedDocumentCantHaveValue => {}
+                Status::Unknown(code) => {
+                    panic!("ALL holds named variants only, found Unknown({code:#06x})")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_named_variant_decodes_back() {
+        for status in ALL.iter().copied() {
+            let code = u16::from(status);
+            let decoded = Status::from(code);
+            assert_eq!(
+                decoded, status,
+                "{status:?} encodes to {code:#06x}, but {code:#06x} decodes to {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_code_re_encodes_to_itself() {
+        for code in 0..=u16::MAX {
+            let status = Status::from(code);
+            let encoded = u16::from(status);
+            assert_eq!(
+                encoded, code,
+                "{code:#06x} decodes to {status:?}, which encodes back to {encoded:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_owned_and_borrowed_encoders_agree() {
+        // Two encode impls is two chances to drift; the by-reference one is the
+        // only body, and this says so.
+        for code in 0..=u16::MAX {
+            let status = Status::from(code);
+            assert_eq!(u16::from(status), u16::from(&status), "{status:?}");
+        }
+    }
+}

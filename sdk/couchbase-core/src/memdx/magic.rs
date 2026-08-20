@@ -92,3 +92,68 @@ impl Display for Magic {
         write!(f, "{txt}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Hand-written tables in both directions, so a test walks both. Magic has
+    // no `Unknown` variant, so an unlisted byte is an error rather than a
+    // carried value.
+    const ALL: &[Magic] = &[
+        Magic::Req,
+        Magic::Res,
+        Magic::ReqExt,
+        Magic::ResExt,
+        Magic::ServerReq,
+        Magic::ServerRes,
+    ];
+
+    #[test]
+    fn all_lists_every_variant() {
+        for magic in ALL.iter().copied() {
+            // Exhaustive on purpose: no wildcard arm, so a new variant stops
+            // this compiling until it is named here, and the list it belongs in
+            // is the one directly above.
+            match magic {
+                Magic::Req
+                | Magic::Res
+                | Magic::ReqExt
+                | Magic::ResExt
+                | Magic::ServerReq
+                | Magic::ServerRes => {}
+            }
+        }
+    }
+
+    #[test]
+    fn every_variant_decodes_back() {
+        for magic in ALL.iter().copied() {
+            let code = u8::from(magic);
+            let decoded = Magic::try_from(code).unwrap();
+            assert_eq!(
+                decoded, magic,
+                "{magic:?} encodes to {code:#04x}, but {code:#04x} decodes to {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_code_re_encodes_or_is_rejected() {
+        for code in 0..=u8::MAX {
+            match Magic::try_from(code) {
+                Ok(magic) => {
+                    let encoded = u8::from(magic);
+                    assert_eq!(
+                        encoded, code,
+                        "{code:#04x} decodes to {magic:?}, which encodes back to {encoded:#04x}"
+                    );
+                }
+                Err(_) => assert!(
+                    !ALL.iter().any(|magic| u8::from(*magic) == code),
+                    "{code:#04x} is encodable but not decodable"
+                ),
+            }
+        }
+    }
+}
