@@ -21,4 +21,5 @@ pub mod diagnostics;
 pub mod kv;
 pub mod pingreport;
 pub mod query;
+pub mod rangescan;
 pub mod search;

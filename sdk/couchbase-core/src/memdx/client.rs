@@ -237,7 +237,8 @@ impl Client {
                                             }
                                         }
 
-                                        if context.is_persistent {
+                                        let is_persistent = context.is_persistent;
+                                        if is_persistent {
                                             {
                                                 let mut map = requests.lock().unwrap();
                                                 map.insert(opaque, context.clone());
@@ -249,6 +250,35 @@ impl Client {
                                             Ok(_) => {}
                                             Err(e) => {
                                                 debug!("Sending response to caller failed: {e}");
+
+                                                // A multi-response operation whose caller went
+                                                // away mid-stream. Its opaque was re-registered
+                                                // just above, so take it back out and report the
+                                                // packet as an orphan -- the connection itself is
+                                                // healthy, and tearing it down would punish every
+                                                // other operation on it for one abandoned stream.
+                                                if is_persistent {
+                                                    {
+                                                        let mut map = requests.lock().unwrap();
+                                                        map.remove(&opaque);
+                                                    }
+
+                                                    if let Some(ref orphan_handler) = opts.orphan_handler {
+                                                        if let Ok(resp) = e.0 {
+                                                            orphan_handler(
+                                                                resp.packet(),
+                                                                OrphanContext {
+                                                                    client_id: opts.client_id.clone(),
+                                                                    local_addr: opts.local_addr,
+                                                                    peer_addr: opts.peer_addr,
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+
+                                                    continue;
+                                                }
+
                                                 let graceful = opts.closed.load(Ordering::SeqCst) || opts.on_close_cancel.is_cancelled();
                                                 Self::on_read_loop_close(&opts.client_id, stream, opaque_map, opts.on_read_close_handler, graceful).await;
                                                 return;

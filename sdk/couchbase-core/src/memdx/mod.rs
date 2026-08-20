@@ -38,6 +38,7 @@ pub mod op_bootstrap;
 pub mod opcode;
 pub mod ops_core;
 pub mod ops_crud;
+pub mod ops_rangescan;
 pub mod ops_util;
 pub mod packet;
 pub mod pendingop;

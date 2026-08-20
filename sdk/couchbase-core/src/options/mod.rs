@@ -25,6 +25,7 @@ pub mod ondemand_agentmanager;
 pub mod orphan_reporter;
 pub mod ping;
 pub mod query;
+pub mod rangescan;
 pub mod search;
 pub mod search_management;
 pub mod waituntilready;

@@ -33,6 +33,9 @@ use crate::kvendpointclientmanager::KvEndpointClientManager;
 use crate::memdx::datatype::DataTypeFlag;
 use crate::memdx::error::ServerErrorKind;
 use crate::memdx::hello_feature::HelloFeature;
+use crate::memdx::ops_rangescan::{
+    RangeScanConfig, RangeScanCreateRequest, RangeScanCreateResponse,
+};
 use crate::memdx::request::{
     AddRequest, AppendRequest, DecrementRequest, DeleteRequest, GetAndLockRequest,
     GetAndTouchRequest, GetCollectionIdRequest, GetMetaRequest, GetRequest, IncrementRequest,
@@ -48,6 +51,7 @@ use crate::options::crud::{
     LookupInOptions, MutateInOptions, PrependOptions, ReplaceOptions, TouchOptions, UnlockOptions,
     UpsertOptions,
 };
+use crate::options::rangescan::RangeScanCreateOptions;
 use crate::results::kv::{
     AddResult, AppendResult, DecrementResult, DeleteResult, GetAndLockResult, GetAndTouchResult,
     GetCollectionIdResult, GetMetaResult, GetResult, IncrementResult, LookupInResult,
@@ -58,6 +62,7 @@ use crate::retry::{
     error_to_retry_reason, orchestrate_retries, RetryManager, RetryRequest, RetryStrategy,
 };
 use crate::vbucketrouter::{orchestrate_memd_routing, VbucketRouter};
+use bytes::Bytes;
 use futures::{FutureExt, TryFutureExt};
 use tokio::time::sleep;
 use tracing::debug;
@@ -70,6 +75,13 @@ pub(crate) struct CrudComponent<
     Comp: Compressor,
 > {
     conn_manager: Arc<M>,
+    /// Connections for operations that answer with a stream of packets.
+    ///
+    /// **Not a second choice for point operations.** Which manager an operation
+    /// uses is decided by how many responses it gets, not by what it is called,
+    /// and it is decided here and nowhere else: there is no accessor and no way
+    /// to ask for the other one.
+    bulk_conn_manager: Arc<M>,
     router: Arc<V>,
     nmvb_handler: Arc<Nmvb>,
     collections: Arc<C>,
@@ -90,12 +102,14 @@ impl<
         nmvb_handler: Arc<Nmvb>,
         router: Arc<V>,
         conn_manager: Arc<M>,
+        bulk_conn_manager: Arc<M>,
         collections: Arc<C>,
         retry_manager: Arc<RetryManager>,
         compression_manager: Arc<CompressionManager<Comp>>,
     ) -> Self {
         CrudComponent {
             conn_manager,
+            bulk_conn_manager,
             router,
             nmvb_handler,
             collections,
@@ -913,6 +927,76 @@ impl<
                         }
                     })
                     .await
+            },
+        )
+        .await
+    }
+
+    /// Open a scan on one vbucket, and say which connection it was opened on.
+    ///
+    /// The client comes back with the response because a scan belongs to the
+    /// connection that created it: its continues and its cancel have to go out
+    /// on the same one, so the caller keeps it for the life of the scan rather
+    /// than asking the manager again and landing somewhere else.
+    ///
+    /// Routing is **by vbucket, not by key** -- there is no key to hash, and a
+    /// `NotMyVbucket` here is left to the retry manager rather than handled
+    /// in-line, because a moved vbucket means a different node and therefore a
+    /// different scan.
+    pub(crate) async fn range_scan_create(
+        &self,
+        opts: RangeScanCreateOptions<'_>,
+    ) -> Result<(RangeScanCreateResponse, Arc<KvClientManagerClientType<M>>)> {
+        orchestrate_retries(
+            self.retry_manager.clone(),
+            opts.retry_strategy.clone(),
+            RetryRequest::new("range_scan_create", true),
+            async || {
+                orchestrate_memd_collection_id(
+                    self.collections.clone(),
+                    opts.scope_name,
+                    opts.collection_name,
+                    async |collection_id: u32| {
+                        let endpoint = self.router.dispatch_to_vbucket(opts.vbucket_id)?;
+
+                        orchestrate_endpoint_kv_client(
+                            // **The dispatch site that settles the whole scan.**
+                            // The handle keeps the client this returns and its
+                            // continues go out on it, so naming the bulk manager
+                            // here names it for every packet of the scan.
+                            self.bulk_conn_manager.clone(),
+                            &endpoint,
+                            async |client: Arc<KvClientManagerClientType<M>>| {
+                                let resp = client
+                                    .range_scan_create(RangeScanCreateRequest {
+                                        vbucket_id: opts.vbucket_id,
+                                        config: RangeScanConfig {
+                                            collection_id,
+                                            keys_only: opts.keys_only,
+                                            range: opts.range.clone(),
+                                            sampling: opts.sampling.clone(),
+                                            snapshot: opts.snapshot.clone(),
+                                        },
+                                        on_behalf_of: None,
+                                    })
+                                    .await
+                                    .map_err(|e| {
+                                        Error::new_contextual_memdx_error(
+                                            e.set_bucket_name(
+                                                client.bucket_name().unwrap_or_default(),
+                                            )
+                                            .set_scope_name(opts.scope_name.to_string())
+                                            .set_collection_name(opts.collection_name.to_string()),
+                                        )
+                                    })?;
+
+                                Ok((resp, client))
+                            },
+                        )
+                        .await
+                    },
+                )
+                .await
             },
         )
         .await

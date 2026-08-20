@@ -54,6 +54,9 @@ tokio-rustls = { version = "0.26.4", optional = true }
 [dev-dependencies]
 chrono = "0.4.44"
 criterion = { version = "0.8.2", features = ["async_tokio", "async"] }
+# The allocation tests seed documents into one chosen vbucket, so they need the
+# same key hash the router uses. Already in the tree as a normal dependency.
+crc32fast = "1.5"
 env_logger = "0.11.9"
 envconfig = "0.11.1"
 log = "0.4.29"

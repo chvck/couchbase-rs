@@ -334,6 +334,15 @@ where
     async fn get_client_slow(&self) -> Result<Arc<K>> {
         let babysitter = {
             let babysitters = self.babysitters.lock().await;
+            // A pool configured with no connections has nothing to hand out, and
+            // asking for one used to divide by zero. It is a reachable setting:
+            // the bulk manager is switched off by giving it none.
+            if babysitters.is_empty() {
+                return Err(Error::new_message_error(format!(
+                    "client pool {} has no connections configured",
+                    &self.id
+                )));
+            }
             let client_idx = self.client_idx.fetch_add(1, Ordering::Relaxed);
 
             babysitters[client_idx % babysitters.len()]

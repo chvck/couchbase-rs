@@ -32,6 +32,7 @@ pub(crate) trait VbucketRouter: Send + Sync {
     fn update_vbucket_info(&self, info: VbucketRoutingInfo);
     fn dispatch_by_key(&self, key: &[u8], vbucket_server_idx: u32) -> Result<(Arc<str>, u16)>;
     fn dispatch_to_vbucket(&self, vb_id: u16) -> Result<Arc<str>>;
+    fn num_vbuckets(&self) -> Result<usize>;
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +91,14 @@ impl VbucketRouter for StdVbucketRouter {
         .into())
     }
 
+    fn num_vbuckets(&self) -> Result<usize> {
+        let info = self.routing_info.load();
+        if !info.bucket_selected {
+            return Err(ErrorKind::NoBucket.into());
+        }
+        Ok(Self::get_vbucket_info(&info)?.num_vbuckets())
+    }
+
     fn dispatch_to_vbucket(&self, vb_id: u16) -> Result<Arc<str>> {
         let info = self.routing_info.load();
         if !info.bucket_selected {
@@ -97,7 +106,9 @@ impl VbucketRouter for StdVbucketRouter {
         }
         let idx = Self::get_vbucket_info(&info)?.node_by_vbucket(vb_id, 0)?;
 
-        if idx > 0 {
+        // `>= 0`, not `> 0`: node index 0 is a real node, and it is the active
+        // for roughly 1/n of the vbuckets. `-1` is the only "no server" value.
+        if idx >= 0 {
             if let Some(server) = info.server_list.get(idx as usize) {
                 return Ok(server.clone());
             }
@@ -218,5 +229,29 @@ mod tests {
 
         assert_eq!("endpoint2", &*endpoint);
         assert_eq!(3, vb_id);
+    }
+
+    /// A range scan is routed by vbucket rather than by key, and every vbucket
+    /// has to be reachable -- including the ones whose active is node index 0.
+    #[test]
+    fn dispatch_to_vbucket_reaches_the_first_node() {
+        let routing_info = VbucketRoutingInfo {
+            vbucket_info: Option::from(
+                VbucketMap::new(
+                    vec![vec![0, 1], vec![1, 0], vec![0, 1], vec![0, 1], vec![1, 0]],
+                    1,
+                )
+                .unwrap(),
+            ),
+            server_list: vec![Arc::from("endpoint1"), Arc::from("endpoint2")],
+            bucket_selected: true,
+        };
+
+        let dispatcher = StdVbucketRouter::new(routing_info, VbucketRouterOptions {});
+
+        assert_eq!("endpoint1", &*dispatcher.dispatch_to_vbucket(0).unwrap());
+        assert_eq!("endpoint2", &*dispatcher.dispatch_to_vbucket(1).unwrap());
+        assert_eq!("endpoint1", &*dispatcher.dispatch_to_vbucket(2).unwrap());
+        assert!(dispatcher.dispatch_to_vbucket(9).is_err());
     }
 }

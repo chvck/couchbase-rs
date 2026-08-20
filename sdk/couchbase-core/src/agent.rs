@@ -143,6 +143,23 @@ pub(crate) struct AgentInner {
 
     cfg_manager: Arc<ConfigManagerMemd<AgentClientManager>>,
     conn_mgr: Arc<AgentClientManager>,
+
+    /// Connections for operations that answer with a stream of packets.
+    ///
+    /// **A second manager rather than a bigger first one.** A streaming
+    /// operation holds its connection until it finishes, and kv_engine stops
+    /// executing a connection's queue at the first active command it may not
+    /// reorder — so a point operation queued behind a range scan fan-out waits
+    /// for scans. The two classes also want opposite tuning: cbcore-rs's sweeps
+    /// had a `get` fan-out still improving at 64 outstanding on one connection
+    /// while a scan fan-out stopped improving at about 4 per connection and
+    /// wanted connections instead, so one setting has to pick a loser.
+    ///
+    /// It connects on demand and so costs nothing until something streams.
+    /// Membership is decided by **response count, not opcode**, and it is
+    /// settled in two places only: this field and the operation's dispatch site.
+    bulk_conn_mgr: Arc<AgentClientManager>,
+
     vb_router: Arc<StdVbucketRouter>,
     collections: Arc<AgentCollectionResolver>,
     retry_manager: Arc<RetryManager>,
@@ -241,6 +258,14 @@ impl AgentInner {
             error!("Failed to reconfigure connection manager (add-only); {e}");
         };
 
+        if let Err(e) = self
+            .bulk_conn_mgr
+            .update_endpoints(agent_component_configs.kv_targets.clone(), true)
+            .await
+        {
+            error!("Failed to reconfigure bulk connection manager (add-only); {e}");
+        };
+
         self.vb_router
             .update_vbucket_info(agent_component_configs.vbucket_routing_info);
 
@@ -253,10 +278,18 @@ impl AgentInner {
 
         if let Err(e) = self
             .conn_mgr
-            .update_endpoints(agent_component_configs.kv_targets, false)
+            .update_endpoints(agent_component_configs.kv_targets.clone(), false)
             .await
         {
             error!("Failed to reconfigure connection manager; {e}");
+        }
+
+        if let Err(e) = self
+            .bulk_conn_mgr
+            .update_endpoints(agent_component_configs.kv_targets, false)
+            .await
+        {
+            error!("Failed to reconfigure bulk connection manager; {e}");
         }
 
         self.analytics
@@ -309,6 +342,10 @@ impl AgentInner {
         self.bucket.clone()
     }
 
+    pub(crate) fn num_vbuckets(&self) -> Result<usize> {
+        self.vb_router.num_vbuckets()
+    }
+
     pub async fn reconfigure(&self, opts: ReconfigureAgentOptions) {
         let mut state = self.state.lock().await;
         state.tls_config = opts.tls_config.clone();
@@ -326,7 +363,8 @@ impl AgentInner {
             }
         };
 
-        self.conn_mgr.update_auth(opts.authenticator).await;
+        self.conn_mgr.update_auth(opts.authenticator.clone()).await;
+        self.bulk_conn_mgr.update_auth(opts.authenticator).await;
 
         self.update_state_locked(&mut state).await;
     }
@@ -455,6 +493,23 @@ impl Agent {
 
         let (unsolicited_packet_tx, mut unsolicited_packet_rx) = mpsc::unbounded_channel();
 
+        let bulk_bootstrap_options = KvClientBootstrapOptions {
+            client_name: user_agent.clone(),
+            disable_error_map: state.disable_error_map,
+            disable_mutation_tokens: state.disable_mutation_tokens,
+            disable_server_durations: state.disable_server_durations,
+            // The error map is fetched and published by the primary manager; a
+            // second copy of it would be the same map twice.
+            on_err_map_fetched: None,
+            tcp_keep_alive_time: state.tcp_keep_alive_time,
+            auth_mechanisms: auth_mechanisms.clone(),
+            connect_timeout,
+        };
+        let bulk_unsolicited_packet_tx = unsolicited_packet_tx.clone();
+        let bulk_orphan_handler = opts.orphan_response_handler.clone();
+        let bulk_authenticator = opts.authenticator.clone();
+        let bulk_selected_bucket = opts.bucket_name.clone();
+
         let conn_mgr_id = Uuid::new_v4().to_string();
         info!(
             "Agent {} creating kv endpoint client manager {}",
@@ -481,10 +536,38 @@ impl Agent {
                 },
                 unsolicited_packet_tx: Some(unsolicited_packet_tx),
                 orphan_handler: opts.orphan_response_handler,
-                endpoints: agent_component_configs.kv_targets,
+                endpoints: agent_component_configs.kv_targets.clone(),
                 authenticator: opts.authenticator,
                 disable_decompression: opts.compression_config.disable_decompression,
                 selected_bucket: opts.bucket_name,
+                tracing: tracing.clone(),
+            })
+            .await?,
+        );
+
+        // The bulk manager: same endpoints, same credentials, same handlers, its
+        // own connections. `on_demand_connect` is what keeps it free until
+        // something streams -- the babysitters exist but do not dial until a
+        // client is asked for.
+        let bulk_conn_mgr_id = Uuid::new_v4().to_string();
+        info!(
+            "Agent {} creating bulk kv endpoint client manager {} with {} connections",
+            &agent_id, &bulk_conn_mgr_id, opts.kv_config.num_bulk_connections
+        );
+        let bulk_conn_mgr = Arc::new(
+            StdKvEndpointClientManager::new(KvEndpointClientManagerOptions {
+                id: bulk_conn_mgr_id,
+                on_close_handler: Arc::new(|_manager_id| {}),
+                on_demand_connect: true,
+                num_pool_connections: opts.kv_config.num_bulk_connections,
+                connect_throttle_period: opts.kv_config.connect_throttle_timeout,
+                bootstrap_options: bulk_bootstrap_options,
+                unsolicited_packet_tx: Some(bulk_unsolicited_packet_tx),
+                orphan_handler: bulk_orphan_handler,
+                endpoints: agent_component_configs.kv_targets,
+                authenticator: bulk_authenticator,
+                disable_decompression: opts.compression_config.disable_decompression,
+                selected_bucket: bulk_selected_bucket,
                 tracing: tracing.clone(),
             })
             .await?,
@@ -523,6 +606,7 @@ impl Agent {
             nmvb_handler.clone(),
             vb_router.clone(),
             conn_mgr.clone(),
+            bulk_conn_mgr.clone(),
             collections.clone(),
             retry_manager.clone(),
             compression_manager,
@@ -600,6 +684,7 @@ impl Agent {
             bucket: bucket_name,
             cfg_manager: cfg_manager.clone(),
             conn_mgr,
+            bulk_conn_mgr,
             vb_router,
             crud,
             collections,

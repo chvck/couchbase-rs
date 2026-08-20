@@ -263,6 +263,23 @@ pub struct KvConfig {
     pub enable_mutation_tokens: bool,
     pub enable_server_durations: bool,
     pub num_connections: usize,
+
+    /// Connections available to operations that answer with a **stream** of
+    /// packets: a range scan's continues, a `stats` sweep.
+    ///
+    /// These live on a second connection manager, because a streaming operation
+    /// holds its connection for as long as the answer takes and the server stops
+    /// executing a connection's queue at the first command it may not reorder —
+    /// so a point operation behind a fan-out waits for scans rather than for
+    /// itself. cbcore-rs measured a `get` at 26.0 ms behind a scan against a
+    /// 216 µs control, and its connection sweeps put a scan fan-out's optimum at
+    /// about sixteen connections, which is where this default comes from.
+    ///
+    /// The second manager connects **on demand**, so it costs nothing until
+    /// something streams. Zero disables it: streaming operations then fail
+    /// rather than borrowing the connections point operations are using.
+    pub num_bulk_connections: usize,
+
     pub connect_timeout: Duration,
     pub connect_throttle_timeout: Duration,
 }
@@ -306,6 +323,11 @@ impl KvConfig {
         self.num_connections = num;
         self
     }
+
+    pub fn num_bulk_connections(mut self, num: usize) -> Self {
+        self.num_bulk_connections = num;
+        self
+    }
 }
 
 impl Default for KvConfig {
@@ -316,6 +338,7 @@ impl Default for KvConfig {
             enable_mutation_tokens: true,
             enable_server_durations: true,
             num_connections: 1,
+            num_bulk_connections: 16,
             connect_timeout: Duration::from_secs(10),
             connect_throttle_timeout: Duration::from_secs(5),
         }
@@ -409,12 +432,13 @@ impl Display for KvConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{ on_demand_connect: {}, enable_error_map: {}, enable_mutation_tokens: {}, enable_server_durations: {}, num_connections: {}, connect_timeout: {:?}, connect_throttle_timeout: {:?} }}",
+            "{{ on_demand_connect: {}, enable_error_map: {}, enable_mutation_tokens: {}, enable_server_durations: {}, num_connections: {}, num_bulk_connections: {}, connect_timeout: {:?}, connect_throttle_timeout: {:?} }}",
             self.on_demand_connect,
             self.enable_error_map,
             self.enable_mutation_tokens,
             self.enable_server_durations,
             self.num_connections,
+            self.num_bulk_connections,
             self.connect_timeout,
             self.connect_throttle_timeout
         )

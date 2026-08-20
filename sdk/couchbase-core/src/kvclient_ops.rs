@@ -28,6 +28,11 @@ use crate::memdx::op_auth_sasloauthbearer::{OpsSASLOAuthBearer, SASLOAuthBearerO
 use crate::memdx::op_bootstrap::{BootstrapOptions, OpBootstrap, OpBootstrapEncoder};
 use crate::memdx::ops_core::OpsCore;
 use crate::memdx::ops_crud::OpsCrud;
+use crate::memdx::ops_rangescan::{
+    OpsRangeScan, RangeScanCancelRequest, RangeScanCancelResponse, RangeScanContinueRequest,
+    RangeScanContinueResponse, RangeScanContinueSummary, RangeScanCreateRequest,
+    RangeScanCreateResponse, RangeScanIterState,
+};
 use crate::memdx::ops_util::OpsUtil;
 use crate::memdx::request::{
     AddRequest, AppendRequest, DecrementRequest, DeleteRequest, GetAndLockRequest,
@@ -113,6 +118,30 @@ pub(crate) trait KvClientOps: Sized + Send + Sync {
         &self,
         req: GetCollectionIdRequest,
     ) -> impl Future<Output = KvResult<GetCollectionIdResponse>> + Send;
+    fn range_scan_create(
+        &self,
+        req: RangeScanCreateRequest,
+    ) -> impl Future<Output = KvResult<RangeScanCreateResponse>> + Send;
+
+    /// Send one continue and read the whole stream of packets it answers with.
+    ///
+    /// `data_cb` is handed each response packet as it arrives, rather than the
+    /// packets being collected: a scan's items are slices of the frames they
+    /// came in, so a callback keeps the per-document cost of a scan at zero
+    /// allocations and leaves the copy to whoever actually wants to keep one.
+    fn range_scan_continue<F>(
+        &self,
+        req: RangeScanContinueRequest,
+        data_cb: F,
+    ) -> impl Future<Output = KvResult<RangeScanContinueSummary>> + Send
+    where
+        F: FnMut(RangeScanContinueResponse) + Send;
+
+    fn range_scan_cancel(
+        &self,
+        req: RangeScanCancelRequest,
+    ) -> impl Future<Output = KvResult<RangeScanCancelResponse>> + Send;
+
     fn ping(&self, req: PingRequest) -> impl Future<Output = KvResult<PingResponse>> + Send;
     fn reconfigure_authenticator(
         &self,
@@ -377,6 +406,105 @@ where
         Ok(res)
     }
 
+    async fn range_scan_create(
+        &self,
+        req: RangeScanCreateRequest<'_>,
+    ) -> KvResult<RangeScanCreateResponse> {
+        self.update_last_activity();
+        self.with_dispatch_span(req, |req| async move {
+            let mut op = self
+                .handle_dispatch_side_result(
+                    self.ops_rangescan()
+                        .range_scan_create(self.client(), req)
+                        .await,
+                )
+                .await?;
+            let opaque = op.opaque();
+
+            let res = self.handle_response_side_result(op.recv().await).await?;
+            Ok((res, opaque))
+        })
+        .await
+    }
+
+    async fn range_scan_continue<F>(
+        &self,
+        req: RangeScanContinueRequest<'_>,
+        mut data_cb: F,
+    ) -> KvResult<RangeScanContinueSummary>
+    where
+        F: FnMut(RangeScanContinueResponse) + Send,
+    {
+        self.update_last_activity();
+        self.with_dispatch_span(req, |req| async move {
+            let mut op = self
+                .handle_dispatch_side_result(
+                    self.ops_rangescan()
+                        .range_scan_continue(self.client(), req)
+                        .await,
+                )
+                .await?;
+            let opaque = op.opaque();
+
+            // **Read to the end of the stream, always.** The opaque stays
+            // registered while this op lives, and returning early would drop it
+            // with packets still on their way -- which unregisters the opaque
+            // and lands the rest of the scan's data in the orphan reporter.
+            loop {
+                let resp = self.handle_response_side_result(op.recv().await).await?;
+                let state = resp.stream_state;
+                let server_duration = resp.server_duration;
+                data_cb(resp);
+
+                match state {
+                    RangeScanIterState::Ongoing => continue,
+                    RangeScanIterState::NeedsContinue => {
+                        return Ok((
+                            RangeScanContinueSummary {
+                                more: true,
+                                complete: false,
+                                server_duration,
+                            },
+                            opaque,
+                        ));
+                    }
+                    RangeScanIterState::Complete => {
+                        return Ok((
+                            RangeScanContinueSummary {
+                                more: false,
+                                complete: true,
+                                server_duration,
+                            },
+                            opaque,
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+    }
+
+    async fn range_scan_cancel(
+        &self,
+        req: RangeScanCancelRequest<'_>,
+    ) -> KvResult<RangeScanCancelResponse> {
+        self.update_last_activity();
+        self.with_dispatch_span(req, |req| async move {
+            let mut op = self
+                .handle_dispatch_side_result(
+                    self.ops_rangescan()
+                        .range_scan_cancel(self.client(), req)
+                        .await,
+                )
+                .await?;
+            let opaque = op.opaque();
+
+            let res = self.handle_response_side_result(op.recv().await).await?;
+            Ok((res, opaque))
+        })
+        .await
+    }
+
     async fn ping(&self, req: PingRequest<'_>) -> KvResult<PingResponse> {
         self.update_last_activity();
         self.with_dispatch_span(req, |req| async move {
@@ -509,6 +637,12 @@ where
 
         let res = self.handle_response_side_result(op.recv().await).await?;
         Ok(res)
+    }
+
+    fn ops_rangescan(&self) -> OpsRangeScan {
+        OpsRangeScan {
+            ext_frames_enabled: self.has_feature(HelloFeature::AltRequests),
+        }
     }
 
     fn ops_crud(&self) -> OpsCrud {

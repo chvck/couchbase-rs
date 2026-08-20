@@ -16,20 +16,29 @@
  *
  */
 use crate::common::helpers::{
-    ensure_manifest, generate_bytes_value, generate_key, generate_string_value,
+    ensure_manifest, feature_supported, generate_bytes_value, generate_key, generate_string_value,
+    try_until,
 };
 use crate::common::test_agent::TestAgent;
 use crate::common::test_config::run_test;
+use couchbase_core::features::BucketFeature;
+use couchbase_core::memdx::ops_rangescan::{RangeScanCreateRangeScanConfig, RangeScanItemIter};
 use couchbase_core::options::crud::{AddOptions, GetOptions, ReplaceOptions, UpsertOptions};
 use couchbase_core::options::management::CreateCollectionOptions;
 use couchbase_core::options::query::QueryOptions;
+use couchbase_core::options::rangescan::{
+    RangeScanCancelOptions, RangeScanContinueOptions, RangeScanCreateOptions,
+};
 use couchbase_core::options::waituntilready::WaitUntilReadyOptions;
 use couchbase_core::retryfailfast::FailFastRetryStrategy;
 use couchbase_core::service_type::ServiceType;
 use futures::StreamExt;
 use serial_test::serial;
 use std::future::Future;
+use std::ops::Add;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
 mod common;
 
@@ -242,6 +251,285 @@ async fn ensure_query_ready(agent: &TestAgent) {
         .unwrap();
 }
 
+// ---------------------------------------------------------------------------
+// Range scan
+// ---------------------------------------------------------------------------
+
+/// How many documents to put into the one vbucket these tests scan.
+///
+/// Enough that a chunk of [`SCAN_LARGE_CHUNK`] leaves more behind, so both
+/// measured shapes are the same three round trips and differ only in how many
+/// documents came back.
+#[cfg(feature = "dhat-heap")]
+const SCAN_DOCS_IN_VBUCKET: usize = 16;
+
+/// The two chunk sizes the per-document claim is made with.
+#[cfg(feature = "dhat-heap")]
+const SCAN_SMALL_CHUNK: u32 = 1;
+#[cfg(feature = "dhat-heap")]
+const SCAN_LARGE_CHUNK: u32 = 8;
+
+/// The end of the key space, for a scan with no upper bound within its prefix.
+#[cfg(feature = "dhat-heap")]
+const SCAN_KEY_MAX: &[u8] = &[0xff; 16];
+
+/// The router's key hash, mirrored so the seed can choose a vbucket.
+#[cfg(feature = "dhat-heap")]
+fn vbucket_for(key: &[u8], num_vbuckets: usize) -> u16 {
+    let mid_bits = (crc32fast::hash(key) >> 16) as u16 & 0x7fff;
+    mid_bits % num_vbuckets as u16
+}
+
+/// **What a range scan costs, and what a document within one costs.**
+///
+/// A whole-collection scan is one scan per vbucket — placement is by hash of the
+/// key, so a key range prunes nothing — which makes its cost a fixed term per
+/// vbucket plus a term per document. This pins both, and separates them the only
+/// way an exactly-comparable measurement can: by running the *same three round
+/// trips* over a different number of documents.
+///
+/// One measured run is a create, one continue read to the end of its stream, and
+/// a cancel. It is bounded by `max_count` rather than drained to completion
+/// because how many continues a full drain takes is the server's chunking
+/// decision, not this client's — and a count that moves with the server's
+/// discretion cannot be asserted exactly.
+///
+/// | | cbcore-rs, as measured there | here |
+/// |---|---|---|
+/// | per vbucket | 7.0, after two changes took it from 12.0 | 8, in the client |
+/// | per document | 0.02–0.03 | exactly 0, asserted as an equality |
+///
+/// The absolute figures are not comparable between the two crates — a `get` is 2
+/// allocations there and 11 here, because the memdx layers differ — but the two
+/// changes measured there are both in this port: the create's JSON body is built
+/// without owned `String`s, and the continue's 28-byte extras block lives on the
+/// stack. Undo either and this test moves.
+///
+/// **`SCAN_ALLOCS` is 32, not 8, because the logger is inside the measurement.**
+/// This harness runs at its default level, which is `TRACE`, and every budget in
+/// this file is pinned with the log records in it. One record costs 4
+/// allocations — three growing the `chrono` timestamp, one growing the formatted
+/// line — and a round trip writes two, one for the request and one for the
+/// response, so three round trips carry 24. `RUST_LOG=off` takes this test to 8,
+/// `upsert` to 2 and `get` to 3; the gate is therefore run with `RUST_LOG`
+/// unset, and 8 is the figure to compare with cbcore-rs's 7.0: two per round
+/// trip for the dispatch channel, one for the create's body, one for the
+/// bucket-feature check.
+#[serial]
+#[cfg(feature = "dhat-heap")]
+#[test]
+fn range_scan() {
+    run_test(async |agent| {
+        if !feature_supported(&agent, BucketFeature::RangeScan).await {
+            eprintln!("  skipped: the bucket does not support range scan");
+            return;
+        }
+
+        ensure_agent_ready(&agent).await;
+
+        let num_vbuckets = agent.num_vbuckets().await.unwrap();
+
+        // Seeded into a single vbucket, so the number of documents in range is
+        // exactly known rather than however the key hash happened to spread them.
+        let prefix = format!("allocscan-{}-", generate_string_value(8));
+        let mut keys: Vec<String> = Vec::with_capacity(SCAN_DOCS_IN_VBUCKET);
+        let mut chosen = None;
+        let mut candidate = 0usize;
+        while keys.len() < SCAN_DOCS_IN_VBUCKET {
+            let key = format!("{prefix}{candidate:06}");
+            candidate += 1;
+            let key_vb = vbucket_for(key.as_bytes(), num_vbuckets);
+            match chosen {
+                None => {
+                    chosen = Some(key_vb);
+                    keys.push(key);
+                }
+                Some(vb) if vb == key_vb => keys.push(key),
+                _ => {}
+            }
+        }
+        let vbucket_id = chosen.unwrap();
+
+        let strategy: Arc<dyn couchbase_core::retry::RetryStrategy> =
+            Arc::new(FailFastRetryStrategy::default());
+        for key in &keys {
+            agent
+                .upsert(
+                    UpsertOptions::new(key.as_bytes(), "", "", br#"{"a":1}"#)
+                        .retry_strategy(strategy.clone()),
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut end = prefix.as_bytes().to_vec();
+        end.extend_from_slice(SCAN_KEY_MAX);
+
+        let create_opts = RangeScanCreateOptions::new("", "", vbucket_id)
+            .range(RangeScanCreateRangeScanConfig {
+                start: Some(prefix.as_bytes()),
+                end: Some(&end),
+                exclusive_start: None,
+                exclusive_end: None,
+            })
+            .retry_strategy(strategy.clone());
+        let unbounded = RangeScanContinueOptions::new();
+        let small = RangeScanContinueOptions::new().max_count(SCAN_SMALL_CHUNK);
+        let large = RangeScanContinueOptions::new().max_count(SCAN_LARGE_CHUNK);
+        let cancel_opts = RangeScanCancelOptions::new();
+
+        // A range scan reads the vbucket's persisted state, so a document is not
+        // in range the instant its write is acknowledged. Nothing is measured
+        // until every seeded document is readable, or the two shapes would not
+        // be reading the same data.
+        try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(250),
+            "the seeded documents did not become scannable in time",
+            || async {
+                let seen =
+                    scan_one_chunk(&agent, &create_opts, &unbounded, &cancel_opts, false).await;
+                Ok(if seen == SCAN_DOCS_IN_VBUCKET {
+                    Some(())
+                } else {
+                    None
+                })
+            },
+        )
+        .await;
+
+        let small_op = async |agent: &TestAgent, _run: usize| {
+            let seen = scan_one_chunk(agent, &create_opts, &small, &cancel_opts, true).await;
+            assert_eq!(seen, SCAN_SMALL_CHUNK as usize);
+        };
+        let large_op = async |agent: &TestAgent, _run: usize| {
+            let seen = scan_one_chunk(agent, &create_opts, &large, &cancel_opts, true).await;
+            assert_eq!(seen, SCAN_LARGE_CHUNK as usize);
+        };
+
+        for run in 0..WARMUP_RUNS {
+            small_op(&agent, run).await;
+            large_op(&agent, run).await;
+        }
+
+        let profiler = dhat::Profiler::builder().testing().build();
+
+        let (small_min, small_worst) = measure_allocations(&agent, WARMUP_RUNS, small_op).await;
+        let (large_min, large_worst) = measure_allocations(&agent, WARMUP_RUNS, large_op).await;
+
+        let per_document =
+            (large_min as f64 - small_min as f64) / (SCAN_LARGE_CHUNK - SCAN_SMALL_CHUNK) as f64;
+        eprintln!(
+            "  range scan on vbucket {vbucket_id} of {num_vbuckets}, \
+             {SCAN_DOCS_IN_VBUCKET} documents in range"
+        );
+        eprintln!(
+            "    create + continue({SCAN_SMALL_CHUNK}) + cancel: {small_min} \
+             allocations (worst {small_worst})"
+        );
+        eprintln!(
+            "    create + continue({SCAN_LARGE_CHUNK}) + cancel: {large_min} \
+             allocations (worst {large_worst})"
+        );
+        eprintln!(
+            "    => {per_document:.2} per document, over {} more documents",
+            SCAN_LARGE_CHUNK - SCAN_SMALL_CHUNK
+        );
+
+        // The per-vbucket term: everything a scan costs that is not a document.
+        let expected_allocs: u64 = if agent.test_setup_config.use_ssl {
+            SCAN_ALLOCS + 2 * SCAN_ROUND_TRIPS
+        } else {
+            SCAN_ALLOCS
+        };
+        dhat::assert_eq!(
+            small_min,
+            expected_allocs,
+            "a create, a continue and a cancel allocated {} times, not {}. If \
+             this is a deliberate improvement, lower SCAN_ALLOCS; if it is a \
+             regression, look first at the create's JSON body and the \
+             continue's extras block, which are the two terms deliberately \
+             kept off the heap. If it is 8, the log level is not this \
+             harness's default and 24 of the expected number is the logger.",
+            small_min,
+            expected_allocs
+        );
+
+        // The per-document term, which is the claim that reading a scan does not
+        // allocate per item: the same three round trips over eight times the
+        // documents must cost the same.
+        dhat::assert_eq!(
+            large_min,
+            small_min,
+            "reading {} documents cost {} allocations against {} for reading \
+             {} — something on the item decode path is now allocating per \
+             document, which is the term that scales with the data.",
+            SCAN_LARGE_CHUNK,
+            large_min,
+            small_min,
+            SCAN_SMALL_CHUNK
+        );
+
+        drop(profiler);
+    });
+}
+
+/// The measured operation: open a scan, read one chunk of it, release it.
+///
+/// Returns how many documents the chunk carried. The options are borrowed rather
+/// than built here — building them allocates an `Arc` for the retry strategy,
+/// which would be counted against the scan.
+#[cfg(feature = "dhat-heap")]
+async fn scan_one_chunk(
+    agent: &TestAgent,
+    create_opts: &RangeScanCreateOptions<'_>,
+    continue_opts: &RangeScanContinueOptions,
+    cancel_opts: &RangeScanCancelOptions,
+    expect_more: bool,
+) -> usize {
+    let scan = agent
+        .range_scan_create(create_opts.clone())
+        .await
+        .expect("the seeded vbucket should open a scan");
+
+    let mut items = 0usize;
+    let res = scan
+        .continue_scan(continue_opts, |resp| {
+            // Counted, not collected: an item is a slice of the packet it
+            // arrived in, and keeping one is what costs.
+            items += match resp.items {
+                RangeScanItemIter::Full(iter) => iter.count(),
+                RangeScanItemIter::KeyOnly(iter) => iter.count(),
+            };
+        })
+        .await
+        .expect("continuing a scan just created should succeed");
+
+    if expect_more {
+        assert!(
+            res.more,
+            "a bounded chunk of a {SCAN_DOCS_IN_VBUCKET} document vbucket \
+             should leave more behind, or the two measured shapes are not the \
+             same three round trips"
+        );
+        scan.cancel(cancel_opts)
+            .await
+            .expect("cancelling an open scan should succeed");
+    } else {
+        // The unbounded read used to wait for persistence: drain it rather than
+        // leaving a scan open behind us.
+        while !res.complete
+            && !scan
+                .continue_scan(continue_opts, |_| {})
+                .await
+                .expect("draining should succeed")
+                .complete
+        {}
+    }
+
+    items
+}
+
 async fn ensure_agent_ready(agent: &TestAgent) {
     agent
         .wait_until_ready(&WaitUntilReadyOptions::new().service_types(vec![ServiceType::MEMD]))
@@ -267,6 +555,25 @@ async fn create_doc(key: Vec<u8>, value: Vec<u8>, collection: &str, agent: &Test
 #[cfg(feature = "dhat-heap")]
 const WARMUP_RUNS: usize = 100;
 
+/// What a create, one bounded continue and a cancel allocate, measured.
+///
+/// 8 in the client and 24 in the logger, which this harness measures at its
+/// default `TRACE` level along with every other budget here.
+///
+/// **Lowering this is a change to the assertion, not a failure.** See
+/// [`range_scan`] for what the number is made of and which parts of it are this
+/// crate's to spend.
+#[cfg(feature = "dhat-heap")]
+const SCAN_ALLOCS: u64 = 32;
+
+/// Round trips in one measured scan run: the create, the continue, the cancel.
+///
+/// Only used to infer the TLS arm. The cluster this was measured against is not
+/// TLS, and a `get` costs 11 without it and 13 with, so the inference is two
+/// allocations per round trip. It is an inference, not a measurement.
+#[cfg(feature = "dhat-heap")]
+const SCAN_ROUND_TRIPS: u64 = 3;
+
 /// Measured runs. The budget is compared against the *minimum* of these — the
 /// cleanest run is the one where no unrelated background work landed inside
 /// the window.
@@ -289,15 +596,7 @@ where
 
     let profiler = dhat::Profiler::builder().testing().build();
 
-    let mut min = u64::MAX;
-    let mut worst = 0u64;
-    for run in 0..MEASURED_RUNS {
-        let before = dhat::HeapStats::get().total_blocks;
-        op(&agent, WARMUP_RUNS + run).await;
-        let delta = dhat::HeapStats::get().total_blocks - before;
-        min = min.min(delta);
-        worst = worst.max(delta);
-    }
+    let (min, worst) = measure_allocations(&agent, WARMUP_RUNS, op).await;
 
     eprintln!("  {min} allocations on the cleanest of {MEASURED_RUNS} runs (worst {worst})");
 
@@ -313,4 +612,26 @@ where
     );
 
     drop(profiler);
+}
+
+/// Run `op` `MEASURED_RUNS` times and return the cleanest and worst counts.
+///
+/// A profiler must already be running; warm-up is the caller's business, because
+/// a test measuring two shapes of the same operation warms both before it
+/// measures either.
+#[cfg(feature = "dhat-heap")]
+async fn measure_allocations<Op>(agent: &TestAgent, first_run: usize, op: Op) -> (u64, u64)
+where
+    Op: AsyncFn(&TestAgent, usize),
+{
+    let mut min = u64::MAX;
+    let mut worst = 0u64;
+    for run in 0..MEASURED_RUNS {
+        let before = dhat::HeapStats::get().total_blocks;
+        op(agent, first_run + run).await;
+        let delta = dhat::HeapStats::get().total_blocks - before;
+        min = min.min(delta);
+        worst = worst.max(delta);
+    }
+    (min, worst)
 }

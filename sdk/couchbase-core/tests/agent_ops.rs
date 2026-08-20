@@ -21,21 +21,30 @@ extern crate core;
 use crate::common::default_agent_options::{create_default_options, create_options_without_bucket};
 use crate::common::helpers::try_until;
 use crate::common::helpers::{
-    create_collection_and_wait_for_kv, delete_collection_and_wait_for_kv, generate_bytes_value,
-    generate_key, generate_string_key, is_memdx_error,
+    create_collection_and_wait_for_kv, delete_collection_and_wait_for_kv, feature_supported,
+    generate_bytes_value, generate_key, generate_string_key, is_memdx_error,
 };
+use crate::common::test_agent::TestAgent;
 use crate::common::test_config::{run_test, setup_test};
 use couchbase_core::agent::Agent;
+use couchbase_core::features::BucketFeature;
 use couchbase_core::memdx::durability_level::DurabilityLevel;
 use couchbase_core::memdx::error::{ErrorKind, ServerErrorKind, SubdocErrorKind};
+use couchbase_core::memdx::ops_rangescan::{RangeScanCreateRangeScanConfig, RangeScanItemIter};
 use couchbase_core::memdx::subdoc::{LookupInOp, LookupInOpType, MutateInOp, MutateInOpType};
+use couchbase_core::options::agent::KvConfig;
 use couchbase_core::options::crud::{
     AddOptions, AppendOptions, DecrementOptions, DeleteOptions, GetAndLockOptions,
     GetAndTouchOptions, GetOptions, IncrementOptions, LookupInOptions, MutateInOptions,
     PrependOptions, ReplaceOptions, TouchOptions, UnlockOptions, UpsertOptions,
 };
+use couchbase_core::options::rangescan::{
+    RangeScanCancelOptions, RangeScanContinueOptions, RangeScanCreateOptions,
+};
+use couchbase_core::options::waituntilready::WaitUntilReadyOptions;
 use couchbase_core::retrybesteffort::{BestEffortRetryStrategy, ExponentialBackoffCalculator};
 use couchbase_core::retryfailfast::FailFastRetryStrategy;
+use couchbase_core::service_type::ServiceType;
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng, RngExt};
 use serde::Serialize;
@@ -819,5 +828,430 @@ fn test_unknown_scope() {
             },
         )
         .await;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Range scan
+// ---------------------------------------------------------------------------
+
+/// The end of the key space, for a scan with no upper bound within its prefix.
+const RANGE_SCAN_KEY_MAX: &[u8] = &[0xff; 16];
+
+/// Seed `count` documents under a shared prefix and return the prefix.
+///
+/// The default collection is used with a unique prefix rather than a fresh
+/// collection: the range bounds are on whole keys, so a prefix range isolates
+/// this run's documents from every other test's without paying for a collection
+/// create and a manifest propagation wait.
+async fn seed_scan_documents(agent: &TestAgent, count: usize) -> (String, Vec<String>) {
+    let prefix = format!("rangescan-{}-", generate_string_key());
+    let strat = Arc::new(BestEffortRetryStrategy::new(
+        ExponentialBackoffCalculator::default(),
+    ));
+
+    let mut keys = Vec::with_capacity(count);
+    for i in 0..count {
+        let key = format!("{prefix}{i:04}");
+        agent
+            .upsert(
+                UpsertOptions::new(key.as_bytes(), "", "", br#"{"scanned":true}"#)
+                    .retry_strategy(strat.clone()),
+            )
+            .await
+            .unwrap();
+        keys.push(key);
+    }
+
+    (prefix, keys)
+}
+
+/// Scan every vbucket for `prefix`, draining each scan to completion.
+///
+/// Returns the keys found, and how many vbuckets actually opened a scan. A
+/// vbucket with nothing in range answers `KeyNotFound` at create rather than
+/// opening an empty scan, which is an empty result and not a failure.
+async fn scan_all_vbuckets(
+    agent: &TestAgent,
+    prefix: &str,
+    keys_only: bool,
+) -> (Vec<String>, usize, usize) {
+    let mut end = prefix.as_bytes().to_vec();
+    end.extend_from_slice(RANGE_SCAN_KEY_MAX);
+
+    let num_vbuckets = agent.num_vbuckets().await.unwrap();
+    let mut found = vec![];
+    let mut scanned_vbuckets = 0;
+    let mut values_seen = 0;
+
+    for vb in 0..num_vbuckets as u16 {
+        let created = agent
+            .range_scan_create(
+                RangeScanCreateOptions::new("", "", vb)
+                    .keys_only(keys_only)
+                    .range(RangeScanCreateRangeScanConfig {
+                        start: Some(prefix.as_bytes()),
+                        end: Some(&end),
+                        exclusive_start: None,
+                        exclusive_end: None,
+                    })
+                    .retry_strategy(Arc::new(FailFastRetryStrategy::default())),
+            )
+            .await;
+
+        let scan = match created {
+            Ok(scan) => scan,
+            Err(e) => {
+                assert!(
+                    is_memdx_error(&e)
+                        .map(|me| matches!(
+                            me.kind(),
+                            ErrorKind::Server(se) if se.kind() == &ServerErrorKind::KeyNotFound
+                        ))
+                        .unwrap_or(false),
+                    "range scan create on vbucket {vb} failed with something other than an \
+                     empty vbucket: {e}"
+                );
+                continue;
+            }
+        };
+        scanned_vbuckets += 1;
+
+        loop {
+            let res = scan
+                .continue_scan(&RangeScanContinueOptions::new(), |resp| match resp.items {
+                    RangeScanItemIter::Full(items) => {
+                        for item in items {
+                            let item = item.unwrap();
+                            if !item.value.is_empty() {
+                                values_seen += 1;
+                            }
+                            found.push(String::from_utf8(item.key.to_vec()).unwrap());
+                        }
+                    }
+                    RangeScanItemIter::KeyOnly(items) => {
+                        for item in items {
+                            found.push(String::from_utf8(item.unwrap().key.to_vec()).unwrap());
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+
+            // Drain until `complete`, not until `more` goes false: a continue
+            // that is still streaming reports neither.
+            if res.complete {
+                break;
+            }
+        }
+    }
+
+    (found, scanned_vbuckets, values_seen)
+}
+
+#[test]
+fn test_range_scan_reads_every_seeded_document() {
+    run_test(async |agent| {
+        if !feature_supported(&agent, BucketFeature::RangeScan).await {
+            return;
+        }
+
+        let (prefix, mut keys) = seed_scan_documents(&agent, 50).await;
+        keys.sort();
+
+        // A range scan reads the vbucket's persisted state, so a document is
+        // not necessarily in range the instant its write is acknowledged. Retry
+        // the whole fan-out rather than sleeping a guess.
+        let found = try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(250),
+            "range scan did not see every seeded document in time",
+            || async {
+                let (mut found, scanned, values) = scan_all_vbuckets(&agent, &prefix, false).await;
+                found.sort();
+                if found.len() == keys.len() {
+                    assert_eq!(
+                        values,
+                        keys.len(),
+                        "a full scan should carry a value for every document"
+                    );
+                    assert!(scanned > 0, "no vbucket opened a scan");
+                    return Ok(Some(found));
+                }
+                Ok(None)
+            },
+        )
+        .await;
+
+        assert_eq!(found, keys);
+    });
+}
+
+#[test]
+fn test_range_scan_keys_only_omits_the_values() {
+    run_test(async |agent| {
+        if !feature_supported(&agent, BucketFeature::RangeScan).await {
+            return;
+        }
+
+        let (prefix, mut keys) = seed_scan_documents(&agent, 10).await;
+        keys.sort();
+
+        let found = try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(250),
+            "keys-only range scan did not see every seeded document in time",
+            || async {
+                let (mut found, _, values) = scan_all_vbuckets(&agent, &prefix, true).await;
+                found.sort();
+                if found.len() == keys.len() {
+                    assert_eq!(values, 0, "a keys-only scan must not carry values");
+                    return Ok(Some(found));
+                }
+                Ok(None)
+            },
+        )
+        .await;
+
+        assert_eq!(found, keys);
+    });
+}
+
+/// Cancelling releases the scan server-side, which the next continue reports.
+#[test]
+fn test_range_scan_cancel_releases_the_scan() {
+    run_test(async |agent| {
+        if !feature_supported(&agent, BucketFeature::RangeScan).await {
+            return;
+        }
+
+        let (prefix, keys) = seed_scan_documents(&agent, 20).await;
+        let mut end = prefix.as_bytes().to_vec();
+        end.extend_from_slice(RANGE_SCAN_KEY_MAX);
+
+        // Wait until the documents are scannable, then find a vbucket that has
+        // some -- an empty one never opens a scan and so has nothing to cancel.
+        let vb = try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(250),
+            "no vbucket opened a scan in time",
+            || async {
+                let (found, _, _) = scan_all_vbuckets(&agent, &prefix, true).await;
+                if found.len() != keys.len() {
+                    return Ok(None);
+                }
+                let num_vbuckets = agent.num_vbuckets().await.unwrap();
+                for vb in 0..num_vbuckets as u16 {
+                    let created = agent
+                        .range_scan_create(RangeScanCreateOptions::new("", "", vb).range(
+                            RangeScanCreateRangeScanConfig {
+                                start: Some(prefix.as_bytes()),
+                                end: Some(&end),
+                                exclusive_start: None,
+                                exclusive_end: None,
+                            },
+                        ))
+                        .await;
+                    if let Ok(scan) = created {
+                        scan.cancel(&RangeScanCancelOptions::new()).await.unwrap();
+                        return Ok(Some(vb));
+                    }
+                }
+                Ok(None)
+            },
+        )
+        .await;
+
+        // And a cancelled scan is gone: a fresh scan on the same vbucket, then
+        // cancel, then continue.
+        let scan = agent
+            .range_scan_create(RangeScanCreateOptions::new("", "", vb).range(
+                RangeScanCreateRangeScanConfig {
+                    start: Some(prefix.as_bytes()),
+                    end: Some(&end),
+                    exclusive_start: None,
+                    exclusive_end: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        scan.cancel(&RangeScanCancelOptions::new()).await.unwrap();
+
+        let err = scan
+            .continue_scan(&RangeScanContinueOptions::new(), |_| {})
+            .await
+            .expect_err("continuing a cancelled scan should fail");
+        let memdx_err = is_memdx_error(&err).expect("expected a memdx error");
+        assert!(
+            matches!(
+                memdx_err.kind(),
+                ErrorKind::Server(se)
+                    if se.kind() == &ServerErrorKind::KeyNotFound
+                        || se.kind() == &ServerErrorKind::RangeScanCancelled
+            ),
+            "continuing a cancelled scan reported {memdx_err}"
+        );
+    });
+}
+
+/// Abandoning a scan mid-drain must not take the connection with it.
+///
+/// A continue is the only operation whose opaque stays registered across
+/// replies, so a caller that walks away from one leaves packets arriving for a
+/// receiver that is gone. Those have to be reported as orphans and the
+/// connection left alone -- every other operation on that socket is innocent.
+#[test]
+fn test_range_scan_abandoned_mid_drain_leaves_the_connection_usable() {
+    run_test(async |agent| {
+        if !feature_supported(&agent, BucketFeature::RangeScan).await {
+            return;
+        }
+
+        let (prefix, keys) = seed_scan_documents(&agent, 50).await;
+        let mut end = prefix.as_bytes().to_vec();
+        end.extend_from_slice(RANGE_SCAN_KEY_MAX);
+
+        let (found, _, _) = try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(250),
+            "range scan did not see every seeded document in time",
+            || async {
+                let res = scan_all_vbuckets(&agent, &prefix, true).await;
+                if res.0.len() == keys.len() {
+                    return Ok(Some(res));
+                }
+                Ok(None)
+            },
+        )
+        .await;
+        assert_eq!(found.len(), keys.len());
+
+        let num_vbuckets = agent.num_vbuckets().await.unwrap();
+        let mut abandoned = 0;
+        for vb in 0..num_vbuckets as u16 {
+            let Ok(scan) = agent
+                .range_scan_create(RangeScanCreateOptions::new("", "", vb).range(
+                    RangeScanCreateRangeScanConfig {
+                        start: Some(prefix.as_bytes()),
+                        end: Some(&end),
+                        exclusive_start: None,
+                        exclusive_end: None,
+                    },
+                ))
+                .await
+            else {
+                continue;
+            };
+
+            // One millisecond is shorter than a scan continue's disk read, so
+            // the future is dropped with the reply still in the air. If a run
+            // happens to beat the deadline the assertions below still hold; it
+            // just did not exercise the abandon path that round.
+            let _ = timeout_at(
+                Instant::now().add(Duration::from_millis(1)),
+                scan.continue_scan(&RangeScanContinueOptions::new(), |_| {}),
+            )
+            .await;
+            drop(scan);
+            abandoned += 1;
+            if abandoned == 4 {
+                break;
+            }
+        }
+        assert!(abandoned > 0, "no vbucket opened a scan to abandon");
+
+        // The connection those scans went out on must still serve everything
+        // else, and a fresh fan-out must still read the whole collection.
+        let key = keys.first().unwrap();
+        agent
+            .get(GetOptions::new(key.as_bytes(), "", ""))
+            .await
+            .expect("a get after an abandoned scan should still work");
+
+        let (found, _, _) = try_until(
+            Instant::now().add(Duration::from_secs(30)),
+            Duration::from_millis(250),
+            "range scan did not recover after a scan was abandoned",
+            || async {
+                let res = scan_all_vbuckets(&agent, &prefix, true).await;
+                if res.0.len() == keys.len() {
+                    return Ok(Some(res));
+                }
+                Ok(None)
+            },
+        )
+        .await;
+        assert_eq!(found.len(), keys.len());
+    });
+}
+
+/// A range scan goes to the bulk connection manager, not the primary one.
+///
+/// **Membership is not observable from outside, so it is proved by removal.**
+/// The bulk manager is the only route a streaming operation has; taking its
+/// connections away leaves point operations untouched and range scans with
+/// nowhere to go. If a scan ever fell back to the primary manager's connections
+/// -- which is the whole thing this separation exists to prevent -- the create
+/// below would succeed and this test would fail.
+#[test]
+fn test_range_scan_uses_the_bulk_connection_manager() {
+    setup_test(async |config| {
+        let mut agent_opts = create_default_options(config).await;
+        agent_opts.kv_config = KvConfig::new().num_bulk_connections(0);
+
+        let agent = Agent::new(agent_opts).await.unwrap();
+        agent
+            .wait_until_ready(&WaitUntilReadyOptions::new().service_types(vec![ServiceType::MEMD]))
+            .await
+            .unwrap();
+
+        if !agent
+            .bucket_features()
+            .await
+            .unwrap()
+            .contains(&BucketFeature::RangeScan)
+        {
+            return;
+        }
+
+        let strat = Arc::new(FailFastRetryStrategy::default());
+        let key = generate_key();
+        let value = generate_bytes_value(32);
+
+        // The primary manager still has its connections, so a point operation
+        // is unaffected.
+        agent
+            .upsert(
+                UpsertOptions::new(key.as_slice(), "", "", value.as_slice())
+                    .retry_strategy(strat.clone()),
+            )
+            .await
+            .expect("a point operation should not go near the bulk manager");
+        agent
+            .get(GetOptions::new(key.as_slice(), "", "").retry_strategy(strat.clone()))
+            .await
+            .expect("a point operation should not go near the bulk manager");
+
+        let mut end = key.clone();
+        end.extend_from_slice(RANGE_SCAN_KEY_MAX);
+        let err = agent
+            .range_scan_create(
+                RangeScanCreateOptions::new("", "", 0)
+                    .range(RangeScanCreateRangeScanConfig {
+                        start: Some(&key),
+                        end: Some(&end),
+                        exclusive_start: None,
+                        exclusive_end: None,
+                    })
+                    .retry_strategy(strat),
+            )
+            .await
+            .expect_err("a range scan with no bulk connections has nowhere to run");
+        assert!(
+            err.to_string().contains("no connections configured"),
+            "a range scan with no bulk connections failed with {err}, which is not \
+             the bulk manager refusing it"
+        );
     });
 }

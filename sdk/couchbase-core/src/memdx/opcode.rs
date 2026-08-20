@@ -53,6 +53,9 @@ pub enum OpCode {
     SubDocMultiMutation,
     SubDocGetCount,
     SubDocReplaceBodyWithXattr,
+    RangeScanCreate,
+    RangeScanContinue,
+    RangeScanCancel,
     GetErrorMap,
     SelectBucket,
     GetLocked,
@@ -104,6 +107,9 @@ impl From<OpCode> for u8 {
             OpCode::SubDocMultiMutation => 0xd1,
             OpCode::SubDocGetCount => 0xd2,
             OpCode::SubDocReplaceBodyWithXattr => 0xd3,
+            OpCode::RangeScanCreate => 0xda,
+            OpCode::RangeScanContinue => 0xdb,
+            OpCode::RangeScanCancel => 0xdc,
             OpCode::GetErrorMap => 0xfe,
             OpCode::Unknown(code) => code,
         }
@@ -151,6 +157,9 @@ impl TryFrom<u8> for OpCode {
             0xd1 => OpCode::SubDocMultiMutation,
             0xd2 => OpCode::SubDocGetCount,
             0xd3 => OpCode::SubDocReplaceBodyWithXattr,
+            0xda => OpCode::RangeScanCreate,
+            0xdb => OpCode::RangeScanContinue,
+            0xdc => OpCode::RangeScanCancel,
             0xfe => OpCode::GetErrorMap,
             _ => OpCode::Unknown(value),
         };
@@ -200,6 +209,9 @@ impl Display for OpCode {
             OpCode::SubDocMultiMutation => "SubDoc multi mutation",
             OpCode::SubDocGetCount => "SubDoc get count",
             OpCode::SubDocReplaceBodyWithXattr => "SubDoc replace body with Xattr",
+            OpCode::RangeScanCreate => "Range scan create",
+            OpCode::RangeScanContinue => "Range scan continue",
+            OpCode::RangeScanCancel => "Range scan cancel",
             OpCode::Unknown(code) => {
                 return write!(f, "x{code:02x}");
             }

@@ -55,6 +55,7 @@ use crate::options::query::{
     DropPrimaryIndexOptions, EnsureIndexOptions, GetAllIndexesOptions, QueryOptions,
     WatchIndexesOptions,
 };
+use crate::options::rangescan::RangeScanCreateOptions;
 use crate::options::search::SearchOptions;
 use crate::options::search_management;
 use crate::options::search_management::{
@@ -73,6 +74,7 @@ use crate::results::kv::{
 };
 use crate::results::pingreport::PingReport;
 use crate::results::query::QueryResultStream;
+use crate::results::rangescan::RangeScanCreateResult;
 use crate::results::search::SearchResultStream;
 use crate::searchx;
 use crate::searchx::document_analysis::DocumentAnalysis;
@@ -421,6 +423,43 @@ impl Agent {
                 .await;
         }
         self.inner.crud.decrement(opts).await
+    }
+
+    /// How many vbuckets the selected bucket has.
+    ///
+    /// A whole-collection range scan is one scan per vbucket, so this is the
+    /// width of the fan-out a caller has to run.
+    pub async fn num_vbuckets(&self) -> Result<usize> {
+        self.inner.num_vbuckets()
+    }
+
+    /// Open a range scan on one vbucket.
+    ///
+    /// **Which connection manager the scan uses is decided here, not by the
+    /// caller.** A scan holds its connection until it drains, so it must not
+    /// share one with point operations -- and because the returned handle keeps
+    /// the connection for its continues, naming it once at create names it for
+    /// the whole scan.
+    pub async fn range_scan_create(
+        &self,
+        opts: RangeScanCreateOptions<'_>,
+    ) -> Result<RangeScanCreateResult> {
+        let vbucket_id = opts.vbucket_id;
+
+        self.run_with_bucket_feature_check(
+            BucketFeature::RangeScan,
+            || async {
+                let (resp, client) = self.inner.crud.range_scan_create(opts).await?;
+
+                Ok(RangeScanCreateResult::new(
+                    resp.scan_uuid,
+                    vbucket_id,
+                    client,
+                ))
+            },
+            "range scan is not supported by this bucket",
+        )
+        .await
     }
 
     pub async fn get_collection_id(
