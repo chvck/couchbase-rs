@@ -247,13 +247,9 @@ impl<C: Client> Indexing<C> {
             "getIndexStatus"
         };
 
-        let auth = match on_behalf_of {
-            Some(obo) => Auth::OnBehalfOf(obo),
-            None => self.auth.clone(),
-        };
-
         let request = Request::new(Method::GET, format!("{}/{path}", self.endpoint))
-            .auth(auth)
+            .auth(self.auth.clone())
+            .on_behalf_of(on_behalf_of)
             .user_agent(self.user_agent.clone());
 
         let response = self.http_client.execute(request).await?;

@@ -382,7 +382,7 @@ impl<C: Client + 'static> IndexComponent<C> {
                 // to it at all. Refusing here names the reason; sending empty
                 // credentials would get "invalid credentials" from the server
                 // and hide it.
-                Auth::BearerAuth(_) | Auth::OnBehalfOf(_) => {
+                Auth::BearerAuth(_) => {
                     return Err(ErrorKind::FeatureNotAvailable {
                         feature: "index scan".to_string(),
                         msg: "the indexing service's queryport authenticates with a username and password, which this authenticator does not provide".to_string(),

@@ -200,27 +200,51 @@ impl Client for ReqwestClient {
             builder = builder.header(USER_AGENT, user_agent);
         }
 
-        if let Some(auth) = &req.auth {
-            match auth {
-                Auth::BasicAuth(basic) => {
-                    builder = builder.basic_auth(&basic.username, Some(&basic.password))
-                }
-                Auth::BearerAuth(bearer) => builder = builder.bearer_auth(&bearer.token),
-                Auth::OnBehalfOf(obo) => {
-                    match &obo.password_or_domain {
-                        OboPasswordOrDomain::Password(password) => {
-                            // If we have the OBO users password, we just directly set the basic auth
-                            // on the request with those credentials rather than using an on-behalf-of
-                            // header.  This enables support for older server versions.
-                            builder = builder.basic_auth(&obo.username, Some(password));
-                        }
-                        OboPasswordOrDomain::Domain(domain) => {
-                            // Otherwise we send the user/domain using an OBO header.
-                            let obo_hdr_string =
-                                BASE64_STANDARD.encode(format!("{}:{}", obo.username, domain));
-                            builder = builder.header("cb-on-behalf-of", obo_hdr_string);
-                        }
+        // **Applied, which they were not.** `Request::add_header` filled a map
+        // that nothing here ever read, so every header a caller set was dropped
+        // on the floor — `searchx` has been asking for `cache-control: no-cache`
+        // on two paths and never sent it.
+        //
+        // Before the auth below rather than after, so a caller-supplied header
+        // cannot displace the credentials the request authenticates with.
+        for (key, value) in req.headers {
+            builder = builder.header(key, value);
+        }
+
+        // **The password form is the only one that replaces the credentials.**
+        // It is basic auth as the impersonated user, which is what lets it work
+        // against servers predating the header; every other case keeps the
+        // credentials, because the server has to authenticate a request before
+        // it can honour a delegation on it.
+        let password_impersonation = matches!(
+            req.on_behalf_of.as_ref().map(|obo| &obo.password_or_domain),
+            Some(OboPasswordOrDomain::Password(_))
+        );
+
+        if !password_impersonation {
+            if let Some(auth) = &req.auth {
+                match auth {
+                    Auth::BasicAuth(basic) => {
+                        builder = builder.basic_auth(&basic.username, Some(&basic.password))
                     }
+                    Auth::BearerAuth(bearer) => builder = builder.bearer_auth(&bearer.token),
+                }
+            }
+        }
+
+        if let Some(obo) = &req.on_behalf_of {
+            match &obo.password_or_domain {
+                OboPasswordOrDomain::Password(password) => {
+                    builder = builder.basic_auth(&obo.username, Some(password));
+                }
+                // Alongside the credentials applied above, never instead of
+                // them: `cb-on-behalf-of` names whose permissions to apply and
+                // says nothing about who is asking, so on its own it is answered
+                // "Failure to authenticate user".
+                OboPasswordOrDomain::Domain(domain) => {
+                    let obo_hdr_string =
+                        BASE64_STANDARD.encode(format!("{}:{}", obo.username, domain));
+                    builder = builder.header("cb-on-behalf-of", obo_hdr_string);
                 }
             }
         }

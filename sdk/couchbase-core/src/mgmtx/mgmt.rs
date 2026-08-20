@@ -71,17 +71,9 @@ impl<C: Client> Management<C> {
         headers: Option<HashMap<&str, &str>>,
         body: Option<Bytes>,
     ) -> Request {
-        let auth = if let Some(obo) = on_behalf_of {
-            Auth::OnBehalfOf(OnBehalfOfInfo {
-                username: obo.username,
-                password_or_domain: obo.password_or_domain,
-            })
-        } else {
-            self.auth.clone()
-        };
-
         let mut req = Request::new(method, format!("{}/{}", self.endpoint, path.into()))
-            .auth(auth)
+            .auth(self.auth.clone())
+            .on_behalf_of(on_behalf_of)
             .user_agent(self.user_agent.clone())
             .content_type(content_type.into())
             .body(body);

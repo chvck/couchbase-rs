@@ -49,9 +49,14 @@ pub fn decode_ext_frame(buf: &[u8]) -> error::Result<(ExtResFrameCode, &[u8], us
     let mut buf_pos = 0;
 
     let frame_header = buf[buf_pos];
-    let mut u_frame_code = (frame_header & 0xF0) >> 4;
-    let mut frame_code = ExtResFrameCode::from(u_frame_code as u16);
-    let mut frame_len = frame_header & 0x0F;
+    // Widened out of `u8` deliberately. Both of these are an escape value *added*
+    // to 15, so the largest either expresses is 15 + 255 = 270 -- which does not
+    // fit the byte it was read from. As `u8` the additions below overflowed: a
+    // panic in a debug build and a silent wrap in a release one, on a length this
+    // side reads straight off the wire.
+    let mut u_frame_code: u16 = ((frame_header & 0xF0) >> 4) as u16;
+    let mut frame_code = ExtResFrameCode::from(u_frame_code);
+    let mut frame_len: usize = (frame_header & 0x0F) as usize;
     buf_pos += 1;
 
     if u_frame_code == 15 {
@@ -61,9 +66,9 @@ pub fn decode_ext_frame(buf: &[u8]) -> error::Result<(ExtResFrameCode, &[u8], us
             ));
         }
 
-        let frame_code_ext = buf[buf_pos];
+        let frame_code_ext = buf[buf_pos] as u16;
         u_frame_code = 15 + frame_code_ext;
-        frame_code = ExtResFrameCode::from(u_frame_code as u16);
+        frame_code = ExtResFrameCode::from(u_frame_code);
         buf_pos += 1;
     }
 
@@ -74,12 +79,12 @@ pub fn decode_ext_frame(buf: &[u8]) -> error::Result<(ExtResFrameCode, &[u8], us
             ));
         }
 
-        let frame_len_ext = buf[buf_pos];
+        let frame_len_ext = buf[buf_pos] as usize;
         frame_len = 15 + frame_len_ext;
         buf_pos += 1;
     }
 
-    let u_frame_len = frame_len as usize;
+    let u_frame_len = frame_len;
     if buf.len() < buf_pos + u_frame_len {
         return Err(Error::new_protocol_error(
             "unexpected eof decoding ext frame",
@@ -161,7 +166,14 @@ pub fn append_ext_frame(
     if frame_len < 15 {
         buf[hdr_byte_ptr] |= (frame_len as u8) & 0xF;
     } else {
-        if frame_len - 15 >= 15 {
+        // The escape byte holds 0..=255 and is *added* to 15, so 270 is the
+        // longest body the wire form expresses -- and `decode_ext_frame` in this
+        // file already reads exactly that. Capping the encoder at 15 here made it
+        // refuse what its own decoder accepts, from 30 bytes up: an on-behalf-of
+        // username of 30 characters failed to encode at all, and this cluster
+        // holds names of 53. Anything that fits the wire but not the caller's
+        // buffer is caught by the bounds checks below.
+        if frame_len - 15 > u8::MAX as usize {
             return Err(Error::new_invalid_argument_error(
                 "ext frame len too large to encode",
                 "ext frame".to_string(),
@@ -501,6 +513,40 @@ mod tests {
     #[test]
     fn no_frames_means_no_duration() {
         assert!(decode_res_ext_frames(&[]).unwrap().is_none());
+    }
+
+    /// A username of thirty bytes or more used to be refused outright: the
+    /// encoder capped the escape byte at 15 where the wire form and this file's
+    /// own decoder both allow 255 added to 15. The cluster this was found on
+    /// holds usernames of 53 characters.
+    #[test]
+    fn a_long_frame_body_round_trips_through_the_escape_byte() {
+        for len in [15usize, 29, 30, 53, 200, 270] {
+            let body = vec![b'u'; len];
+            let mut buf = [0u8; 512];
+            let mut offset = 0;
+
+            append_ext_frame(ExtReqFrameCode::OnBehalfOf, &body, &mut buf, &mut offset)
+                .unwrap_or_else(|e| panic!("a {len}-byte body should encode: {e}"));
+
+            let (code, decoded, _) = decode_ext_frame(&buf[..offset])
+                .unwrap_or_else(|e| panic!("a {len}-byte body should decode: {e}"));
+
+            assert_eq!(u16::from(code), u16::from(ExtReqFrameCode::OnBehalfOf));
+            assert_eq!(decoded, body.as_slice(), "body of {len} did not survive");
+        }
+    }
+
+    /// Past what the escape byte can express, it is still an error.
+    #[test]
+    fn a_body_longer_than_the_wire_form_allows_is_refused() {
+        let body = vec![b'u'; 271];
+        let mut buf = [0u8; 512];
+        let mut offset = 0;
+
+        assert!(
+            append_ext_frame(ExtReqFrameCode::OnBehalfOf, &body, &mut buf, &mut offset).is_err()
+        );
     }
 
     #[test]

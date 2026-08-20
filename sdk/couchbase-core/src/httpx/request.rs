@@ -31,6 +31,15 @@ pub struct Request {
     pub(crate) body: Option<Bytes>,
     pub(crate) headers: HashMap<String, String>,
     pub(crate) unique_id: Option<String>,
+    /// Whose permissions the server should apply, which is **not** the same
+    /// question as who the request authenticates as.
+    ///
+    /// It sits beside [`Request::auth`] rather than inside it because the
+    /// domain form needs both: the server authenticates the request from its
+    /// credentials and reads the header only to decide whose rights to use. It
+    /// was once an `Auth` variant, which left it occupying the slot the
+    /// credentials needed and made a correct request unrepresentable.
+    pub(crate) on_behalf_of: Option<OnBehalfOfInfo>,
 }
 
 impl Request {
@@ -44,6 +53,7 @@ impl Request {
             body: None,
             headers: HashMap::new(),
             unique_id: None,
+            on_behalf_of: None,
         }
     }
 
@@ -74,6 +84,11 @@ impl Request {
 
     pub fn add_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn on_behalf_of(mut self, on_behalf_of: impl Into<Option<OnBehalfOfInfo>>) -> Self {
+        self.on_behalf_of = on_behalf_of.into();
         self
     }
 }
@@ -111,7 +126,6 @@ impl BearerAuth {
 pub enum Auth {
     BasicAuth(BasicAuth),
     BearerAuth(BearerAuth),
-    OnBehalfOf(OnBehalfOfInfo),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
