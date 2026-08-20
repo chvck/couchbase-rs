@@ -123,6 +123,11 @@ impl<C: Client + 'static> SearchComponent<C> {
         }));
     }
 
+    /// Where search is reachable, for [`Agent::get_service_endpoints`](crate::agent::Agent::get_service_endpoints).
+    pub fn network_endpoints(&self) -> Vec<String> {
+        self.http_component.network_endpoints()
+    }
+
     pub async fn query(&self, opts: SearchOptions) -> error::Result<SearchResultStream> {
         if (opts.knn.is_some() || opts.knn_operator.is_some())
             && !self.state.load().vector_search_enabled

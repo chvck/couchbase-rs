@@ -37,6 +37,7 @@ use crate::features::BucketFeature;
 use crate::httpcomponent::HttpComponent;
 use crate::httpx::client::{ClientConfig, ReqwestClient};
 use crate::indexcomponent::{IndexComponent, IndexComponentOptions};
+use crate::indexrouter::NodeMap;
 use crate::kvclient::{
     KvClient, KvClientBootstrapOptions, KvClientOptions, StdKvClient, UnsolicitedPacket,
 };
@@ -381,6 +382,24 @@ impl AgentInner {
         self.bucket.clone()
     }
 
+    /// Where each HTTP-reachable service is, gathered from the components
+    /// that each already track their own — not a value kept here, so this
+    /// can never fall out of step with what `orchestrate_endpoint` itself
+    /// would pick.
+    ///
+    /// `MEMD` has no entry: it is not an HTTP service, and `endpoints_for`
+    /// answers it the same as any other service this crate has no component
+    /// for — empty.
+    fn http_endpoints(&self) -> ServiceEndpoints {
+        ServiceEndpoints {
+            mgmt: self.mgmt.network_endpoints(),
+            query: self.query.network_endpoints(),
+            search: self.search.network_endpoints(),
+            analytics: self.analytics.network_endpoints(),
+            index: self.index.network_endpoints(),
+        }
+    }
+
     pub(crate) fn num_vbuckets(&self) -> Result<usize> {
         self.vb_router.num_vbuckets()
     }
@@ -433,6 +452,40 @@ impl ConfigUpdater for AgentInner {
         if let Some(config) = self.cfg_manager.out_of_band_config(parsed_config) {
             self.apply_config(config).await;
         };
+    }
+}
+
+/// Where each HTTP-reachable service is, as plain URLs — the shape
+/// [`Agent::get_service_endpoints`] answers with, gathered fresh from each
+/// service's component rather than kept as a value of its own.
+///
+/// No `memd` field: the data service is not HTTP, and has no queryport-style
+/// counterpart here either — [`Agent::index_node_map`] is the one service
+/// whose non-HTTP port a caller can ask about.
+#[derive(Default)]
+struct ServiceEndpoints {
+    mgmt: Vec<String>,
+    query: Vec<String>,
+    search: Vec<String>,
+    analytics: Vec<String>,
+    index: Vec<String>,
+}
+
+/// The pure half of [`Agent::get_service_endpoints`]: which list answers a
+/// service, split out so the "a service this cluster does not run is empty,
+/// not an error" property is checkable without an `Agent` — which would mean
+/// a live cluster — to build one against.
+fn endpoints_for(endpoints: &ServiceEndpoints, service: ServiceType) -> Vec<String> {
+    match service {
+        ServiceType::MGMT => endpoints.mgmt.clone(),
+        ServiceType::QUERY => endpoints.query.clone(),
+        ServiceType::SEARCH => endpoints.search.clone(),
+        ServiceType::ANALYTICS => endpoints.analytics.clone(),
+        ServiceType::INDEX => endpoints.index.clone(),
+        // MEMD, EVENTING, and anything a typo or a future service adds: this
+        // crate has no HTTP endpoint list for them, and "nothing to talk to"
+        // is the honest answer rather than a made-up one.
+        _ => Vec::new(),
     }
 }
 
@@ -813,6 +866,30 @@ impl Agent {
         self.inner.config_revision()
     }
 
+    /// Where each service is reachable, as this agent's latest config
+    /// describes it.
+    ///
+    /// Empty for a service the cluster does not run and for a config that has
+    /// not arrived — both of which a caller should read as "nothing to talk
+    /// to" rather than as an error. The latter never happens in practice; see
+    /// `config_revision` for why.
+    pub fn get_service_endpoints(&self, service: ServiceType) -> Vec<String> {
+        endpoints_for(&self.inner.http_endpoints(), service)
+    }
+
+    /// Where each node's queryport is, keyed the way `/getIndexStatus` names
+    /// nodes.
+    ///
+    /// Empty for a cluster with no index service, and for a config that has
+    /// not arrived. Reads the node map the index component's own reconfigure
+    /// already computed from `NodeMap::from_config`, rather than recomputing
+    /// it here from a config and a network type — a second derivation could
+    /// disagree with the one routing actually uses if either read a
+    /// different config revision; a direct read cannot.
+    pub fn index_node_map(&self) -> NodeMap {
+        self.inner.index.nodes()
+    }
+
     fn start_config_watcher(
         inner: Weak<AgentInner>,
         config_watcher: Arc<impl ConfigManager>,
@@ -1114,5 +1191,37 @@ mod config_revision_tests {
         // resets the id: comparing the wrong way round makes a fresh config
         // after a failover look older than the one it replaced.
         assert!((1i64, 5i64) < (2i64, 1i64));
+    }
+}
+
+#[cfg(test)]
+mod service_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_service_is_no_endpoints_rather_than_an_error() {
+        // A cluster with no index service and a caller asking for one are the
+        // same answer: nothing to talk to. A caller should read it as "no
+        // scans from here" rather than as a failure to start.
+        let endpoints = endpoints_for(&ServiceEndpoints::default(), ServiceType::INDEX);
+        assert!(endpoints.is_empty());
+    }
+
+    #[test]
+    fn a_service_the_cluster_runs_is_the_list_gathered_for_it_and_no_other() {
+        // Pinning that endpoints_for is a real dispatch and not just "always
+        // empty" — mgmt's list must come back untouched, and it must not
+        // leak into a sibling service's answer.
+        let endpoints = ServiceEndpoints {
+            mgmt: vec!["http://127.0.0.1:8091".to_string()],
+            query: vec!["http://127.0.0.1:8093".to_string()],
+            ..ServiceEndpoints::default()
+        };
+
+        assert_eq!(
+            endpoints_for(&endpoints, ServiceType::MGMT),
+            vec!["http://127.0.0.1:8091".to_string()]
+        );
+        assert!(endpoints_for(&endpoints, ServiceType::SEARCH).is_empty());
     }
 }

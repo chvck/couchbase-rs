@@ -40,7 +40,7 @@ impl Display for Error {
 impl StdError for Error {}
 
 impl Error {
-    pub(crate) fn new_server_error(e: ServerError) -> Error {
+    pub fn new_server_error(e: ServerError) -> Error {
         Self {
             inner: ErrorImpl {
                 kind: Box::new(ErrorKind::Server(e)),
@@ -228,7 +228,7 @@ pub struct ServerError {
 }
 
 impl ServerError {
-    pub(crate) fn new(
+    pub fn new(
         kind: ServerErrorKind,
         endpoint: impl Into<String>,
         status_code: StatusCode,

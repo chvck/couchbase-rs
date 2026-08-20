@@ -205,6 +205,13 @@ pub struct CollectionManifest {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FullNode {
+    /// `Some(true)` on the node that answered `/pools/default`; every other
+    /// node omits the key rather than sending `false`, so this is never
+    /// `Some(false)` in practice. Lets a caller — `verify_cluster_status` —
+    /// pick the local node out of the list to check its own
+    /// `cluster_membership`.
+    #[serde(alias = "thisNode", default)]
+    pub this_node: Option<bool>,
     #[serde(rename = "clusterMembership", default)]
     pub cluster_membership: Option<String>,
     #[serde(rename = "recoveryType", default)]
@@ -506,4 +513,62 @@ pub struct FullClusterConfig {
     pub nodes: Vec<FullNode>,
     #[serde(rename = "bucketNames")]
     pub bucket_names: Vec<BucketNames>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trimmed from a real `/pools/default` on a live four-node 8.0.3
+    /// cluster (`192.168.107.128`). Cut down to the fields this test needs;
+    /// values (hostnames, `otpNode`, `version`) are exactly what the server
+    /// sent. The thing the capture proved: only the node that answered the
+    /// request carries `thisNode` at all — the other three omit the key
+    /// rather than sending `false`.
+    const POOLS_DEFAULT: &str = r#"{
+        "nodes": [
+            {
+                "clusterMembership": "active",
+                "status": "healthy",
+                "otpNode": "ns_1@192.168.107.128",
+                "thisNode": true,
+                "hostname": "192.168.107.128:8091",
+                "version": "8.0.3-5864-enterprise"
+            },
+            {
+                "clusterMembership": "active",
+                "status": "healthy",
+                "otpNode": "ns_1@192.168.107.129",
+                "hostname": "192.168.107.129:8091",
+                "version": "8.0.3-5864-enterprise"
+            }
+        ],
+        "bucketNames": []
+    }"#;
+
+    #[test]
+    fn the_serving_node_is_marked_this_node() {
+        // /pools/default marks exactly one node thisNode:true — the one that
+        // answered. verify_cluster_status finds it to assert the local node
+        // is rebalanced in, so the field has to survive deserialization.
+        let cfg: FullClusterConfig = serde_json::from_str(POOLS_DEFAULT).unwrap();
+        let local = cfg
+            .nodes
+            .iter()
+            .find(|n| n.this_node == Some(true))
+            .expect("one node is thisNode");
+        assert_eq!(local.cluster_membership.as_deref(), Some("active"));
+        assert!(local.version.is_some());
+
+        // The node that did not answer omits the key entirely.
+        let other = &cfg.nodes[1];
+        assert_eq!(other.this_node, None);
+    }
+
+    #[test]
+    fn a_node_without_this_node_is_none_not_an_error() {
+        let cfg: FullClusterConfig =
+            serde_json::from_str(r#"{"nodes":[{"hostname":"h"}],"bucketNames":[]}"#).unwrap();
+        assert_eq!(cfg.nodes[0].this_node, None);
+    }
 }

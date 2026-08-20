@@ -64,7 +64,7 @@ impl StdError for Error {
 }
 
 impl Error {
-    pub(crate) fn new(kind: ErrorKind) -> Self {
+    pub fn new(kind: ErrorKind) -> Self {
         Self {
             kind: Arc::new(kind),
             retry_info: None,

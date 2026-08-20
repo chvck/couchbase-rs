@@ -131,6 +131,9 @@ impl BucketSettings {
 pub struct BucketDef {
     pub name: String,
     pub bucket_settings: BucketSettings,
+    // How a bucket dropped and recreated under the same name is told apart
+    // from the one it replaced. `None` when the response didn't carry one.
+    pub uuid: Option<String>,
 }
 
 impl BucketDef {
@@ -138,6 +141,7 @@ impl BucketDef {
         Self {
             name,
             bucket_settings,
+            uuid: None,
         }
     }
 }
@@ -146,6 +150,7 @@ impl From<BucketSettingsJson> for BucketDef {
     fn from(settings: BucketSettingsJson) -> Self {
         Self {
             name: settings.name,
+            uuid: settings.uuid,
             bucket_settings: BucketSettings {
                 flush_enabled: settings.controllers.as_ref().map(|c| {
                     if let Some(f) = &c.flush {
@@ -439,5 +444,54 @@ pub(crate) fn encode_bucket_settings(serializer: &mut Serializer<String>, opts: 
     }
     if let Some(num_vbuckets) = opts.num_vbuckets {
         serializer.append_pair("numVBuckets", num_vbuckets.to_string().as_str());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::mgmtx::bucket_settings::BucketDef;
+    use crate::mgmtx::bucket_settings_json::BucketSettingsJson;
+
+    /// Trimmed from a real `/pools/default/buckets/default` response
+    /// (magma, 8.0.3) — full body has ~40 more fields `BucketSettingsJson`
+    /// doesn't care about, which is the point: unknown fields are dropped,
+    /// not rejected.
+    const BUCKET_WITH_UUID: &str = r#"{
+        "name": "default",
+        "uuid": "8857a7b9c24e24eba57ab0a94aea7a6e",
+        "bucketType": "membase",
+        "quota": {"ram": 6442450944, "rawRAM": 2147483648},
+        "replicaNumber": 1,
+        "evictionPolicy": "fullEviction",
+        "storageBackend": "magma"
+    }"#;
+
+    #[test]
+    fn a_bucket_config_carries_its_uuid() {
+        // The uuid is how a dropped-and-recreated bucket of the same name is
+        // told apart from the original; a consumer that reads it must
+        // actually receive it, so the field has to be deserialized rather
+        // than dropped on the floor.
+        let json: BucketSettingsJson = serde_json::from_str(BUCKET_WITH_UUID).unwrap();
+        let def: BucketDef = json.into();
+
+        assert_eq!(
+            def.uuid.as_deref(),
+            Some("8857a7b9c24e24eba57ab0a94aea7a6e")
+        );
+    }
+
+    #[test]
+    fn a_bucket_config_without_a_uuid_is_none_not_an_error() {
+        // Not every bucket-config shape echoes a uuid back (e.g. the body a
+        // settings update returns); that absence must parse to `None`, not
+        // fail the whole response.
+        let json: BucketSettingsJson = serde_json::from_str(
+            r#"{"name":"default","bucketType":"membase","quota":{"ram":1,"rawRAM":1}}"#,
+        )
+        .unwrap();
+        let def: BucketDef = json.into();
+
+        assert!(def.uuid.is_none());
     }
 }

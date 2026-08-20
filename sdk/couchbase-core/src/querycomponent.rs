@@ -105,6 +105,11 @@ impl<C: Client + 'static> QueryComponent<C> {
         ))
     }
 
+    /// Where query is reachable, for [`Agent::get_service_endpoints`](crate::agent::Agent::get_service_endpoints).
+    pub fn network_endpoints(&self) -> Vec<String> {
+        self.http_component.network_endpoints()
+    }
+
     pub async fn query(&self, opts: QueryOptions) -> error::Result<QueryResultStream> {
         let retry_info = RetryRequest::new("query", opts.read_only.unwrap_or_default());
 

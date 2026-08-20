@@ -25,6 +25,11 @@ use serde::{Deserialize, Deserializer};
 #[derive(Debug, Deserialize)]
 pub struct BucketSettingsJson {
     pub name: String,
+    // Not every bucket-config shape carries this (e.g. the settings body
+    // posted back on create/update doesn't echo it), so it must default
+    // rather than fail deserialization.
+    #[serde(default)]
+    pub uuid: Option<String>,
     #[serde(default)]
     pub controllers: Option<Controllers>,
     #[serde(default, rename = "replicaIndex")]

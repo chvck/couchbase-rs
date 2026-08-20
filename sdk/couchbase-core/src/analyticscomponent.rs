@@ -81,6 +81,11 @@ impl<C: Client + 'static> AnalyticsComponent<C> {
         ))
     }
 
+    /// Where analytics is reachable, for [`Agent::get_service_endpoints`](crate::agent::Agent::get_service_endpoints).
+    pub fn network_endpoints(&self) -> Vec<String> {
+        self.http_component.network_endpoints()
+    }
+
     pub async fn query(&self, opts: AnalyticsOptions) -> error::Result<AnalyticsResultStream> {
         let retry_info = RetryRequest::new("analytics", opts.read_only.unwrap_or_default());
 

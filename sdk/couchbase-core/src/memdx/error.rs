@@ -362,7 +362,7 @@ impl Display for ServerError {
 }
 
 impl ServerError {
-    pub(crate) fn new(kind: ServerErrorKind, op_code: OpCode, status: Status, opaque: u32) -> Self {
+    pub fn new(kind: ServerErrorKind, op_code: OpCode, status: Status, opaque: u32) -> Self {
         Self {
             kind,
             config: None,

@@ -117,6 +117,11 @@ impl<C: Client> MgmtComponent<C> {
         ))
     }
 
+    /// Where mgmt is reachable, for [`Agent::get_service_endpoints`](crate::agent::Agent::get_service_endpoints).
+    pub fn network_endpoints(&self) -> Vec<String> {
+        self.http_component.network_endpoints()
+    }
+
     pub async fn get_collection_manifest(
         &self,
         opts: &GetCollectionManifestOptions<'_>,

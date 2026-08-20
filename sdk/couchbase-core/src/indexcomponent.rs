@@ -181,6 +181,25 @@ impl<C: Client + 'static> IndexComponent<C> {
         // from, and it calls [`drain_pools`](Self::drain_pools) itself.
     }
 
+    /// The indexing service's REST endpoints — `/getIndexStatus` and index
+    /// DDL. **Not** the queryport: see [`IndexComponent::nodes`] for that. For
+    /// [`Agent::get_service_endpoints`](crate::agent::Agent::get_service_endpoints).
+    pub fn network_endpoints(&self) -> Vec<String> {
+        self.http_component.network_endpoints()
+    }
+
+    /// Every node's queryport, keyed the way `/getIndexStatus` names nodes.
+    ///
+    /// Reads the node map this component's own state already carries —
+    /// the same one [`refresh`](Self::refresh) joins index placement
+    /// against — rather than deriving a fresh one from a config and a
+    /// network type. A second derivation could disagree with the one
+    /// routing actually uses if either read a different config revision; a
+    /// direct read cannot.
+    pub fn nodes(&self) -> NodeMap {
+        self.state.lock().unwrap().nodes.clone()
+    }
+
     /// Throw away every pooled connection, because what they authenticated with
     /// has changed.
     ///

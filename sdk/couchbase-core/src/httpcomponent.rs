@@ -183,6 +183,23 @@ impl<C: Client> HttpComponent<C> {
         &self.user_agent
     }
 
+    /// Every endpoint this component currently knows how to reach, as plain
+    /// URLs — for a caller that wants to see where a service is rather than
+    /// have this component pick one and dial it, e.g.
+    /// [`Agent::get_service_endpoints`](crate::agent::Agent::get_service_endpoints).
+    ///
+    /// The network address, not the canonical one: this hands a URL to dial,
+    /// and canonical addresses exist to match a peer's self-report against
+    /// the config, not to be dialled themselves.
+    pub fn network_endpoints(&self) -> Vec<String> {
+        let guard = self.state.lock().unwrap();
+        guard
+            .endpoints
+            .values()
+            .map(|e| e.network_endpoint.clone())
+            .collect()
+    }
+
     pub async fn orchestrate_endpoint<Resp, Fut>(
         &self,
         endpoint_id: Option<String>,

@@ -131,7 +131,7 @@ impl Display for ServerError {
 }
 
 impl ServerError {
-    pub(crate) fn new(
+    pub fn new(
         status_code: StatusCode,
         url: String,
         method: Method,
