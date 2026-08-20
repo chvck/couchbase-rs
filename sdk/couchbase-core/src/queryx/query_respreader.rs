@@ -414,6 +414,27 @@ impl QueryRespReader {
                 }
             } else if msg.contains("build already in progress") {
                 ServerErrorKind::BuildAlreadyInProgress
+            } else if msg.contains("build index fails")
+                && msg.contains("index will be retried building")
+            {
+                ServerErrorKind::BuildFails
+            // **Order matters, and the general "index" tests have to stay
+            // below these.** A keyspace failure raised by an index create
+            // arrives wrapped — `Index creation for index X, bucket Y ...
+            // cannot start. Reason: <the real one>` — and a concurrent create
+            // says `another concurrent create index request` outright. Both
+            // carry the word "index", so a general test placed above them
+            // would answer first and neither of these could be reached.
+            //
+            // What is classified is the reason the wrapper carries, which is
+            // why these read the whole message: a wrapper around a transient
+            // cause is transient, and one around a fatal cause stays
+            // `Internal` rather than being retried on the strength of its
+            // envelope.
+            } else if msg.contains("collection not found") || msg.contains("keyspace not found") {
+                ServerErrorKind::CollectionNotFound
+            } else if msg.contains("concurrent create index") {
+                ServerErrorKind::ConcurrentOperation
             } else if Regex::new(".*?ndex .*? already exist.*")
                 .unwrap()
                 .is_match(&error.msg)
@@ -471,8 +492,391 @@ impl QueryRespReader {
             ServerErrorKind::ParsingFailure
         } else if err_code == 13014 {
             ServerErrorKind::AuthenticationFailure
+        } else if err_code == 2120 {
+            // "Error authorizing against cluster cause: Failure to authenticate
+            // user" — a refusal, and one a caller has to be able to report as
+            // one. Group 2 otherwise falls through to `Unknown`, which reads as
+            // "something went wrong" rather than "you may not".
+            ServerErrorKind::AuthenticationFailure
         } else {
             ServerErrorKind::Unknown
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queryx::query_result::Status;
+    use futures::StreamExt;
+
+    /// One error entry, built from the wire shape the query service actually
+    /// sends rather than from the struct, so the `serde` attributes are part of
+    /// what is pinned.
+    fn wire_error(json: &str) -> QueryError {
+        serde_json::from_str(json).expect("error entry did not parse")
+    }
+
+    /// Classify one error entry the way `parse_errors` does, and hand back the
+    /// resulting error.
+    fn classify(json: &str) -> Error {
+        QueryRespReader::parse_errors(
+            &[wire_error(json)],
+            "localhost:8093",
+            "SELECT 1",
+            "ctx",
+            StatusCode::OK,
+        )
+    }
+
+    fn server_kind(err: &Error) -> ServerErrorKind {
+        match err.kind() {
+            ErrorKind::Server(e) => e.kind().clone(),
+            ErrorKind::Resource(e) => e.cause().kind().clone(),
+            other => panic!("expected a server or resource error, got {other:?}"),
+        }
+    }
+
+    fn resource(err: &Error) -> &ResourceError {
+        match err.kind() {
+            ErrorKind::Resource(e) => e,
+            other => panic!("expected a resource error, got {other:?}"),
+        }
+    }
+
+    /// **The four conditions a 5xxx message carries that the code does not.**
+    ///
+    /// Ported from cbcore-rs, where each of these was reached by a message test
+    /// and each one names a recovery: a build the indexer says it will retry, a
+    /// concurrent create to wait out, and a keyspace failure that arrives wrapped
+    /// in an index-creation envelope. Folded into `Internal`, all three read as
+    /// "something went wrong", and a caller waits for none of them.
+    #[test]
+    fn a_5xxx_message_is_classified_by_what_it_says() {
+        for (msg, want) in [
+            (
+                "build already in progress",
+                ServerErrorKind::BuildAlreadyInProgress,
+            ),
+            (
+                "build index fails. index will be retried building",
+                ServerErrorKind::BuildFails,
+            ),
+            (
+                "another concurrent create index request is in progress",
+                ServerErrorKind::ConcurrentOperation,
+            ),
+            (
+                "Index creation for index ix_1, bucket b, scope s, collection c \
+                 cannot start. Reason: Keyspace not found in CB datastore",
+                ServerErrorKind::CollectionNotFound,
+            ),
+            ("something nobody has classified", ServerErrorKind::Internal),
+        ] {
+            let json = format!(
+                r#"{{"code":5000,"msg":{}}}"#,
+                serde_json::to_string(msg).unwrap()
+            );
+            let got = classify(&json);
+            assert_eq!(server_kind(&got), want, "for {msg:?}");
+        }
+    }
+
+    /// **The general "index" tests have to stay below the specific ones.**
+    ///
+    /// Both messages above carry the word "index", so a test for "an index that
+    /// already exists" placed first would answer for them too — which is how the
+    /// previous client's ladder was ordered, and why its comment says so. This
+    /// holds the order rather than the comment.
+    #[test]
+    fn a_specific_5xxx_message_is_not_answered_by_the_general_one() {
+        let concurrent = classify(
+            r#"{"code":5000,"msg":"another concurrent create index request already exists"}"#,
+        );
+        assert_eq!(
+            server_kind(&concurrent),
+            ServerErrorKind::ConcurrentOperation,
+            "a message that mentions both must take the specific arm"
+        );
+    }
+
+    /// 2120 is a refusal, and group 2 otherwise falls through to `Unknown`.
+    ///
+    /// The distinction is what lets a caller answer "you may not" rather than
+    /// "something went wrong" — measured against 8.0.3, an unauthenticated
+    /// request to the query service is answered `2120 Error authorizing against
+    /// cluster cause: Failure to authenticate user`.
+    #[test]
+    fn a_2120_is_an_authentication_failure_and_not_an_unknown() {
+        let refused = classify(
+            r#"{"code":2120,"msg":"Error authorizing against cluster cause: Failure to authenticate user"}"#,
+        );
+        assert_eq!(
+            server_kind(&refused),
+            ServerErrorKind::AuthenticationFailure
+        );
+    }
+
+    /// Ported from cbcore-rs `test_parse_scope_not_found`.
+    #[test]
+    fn a_scope_not_found_message_names_its_bucket_and_scope() {
+        let err = classify(
+            r#"{"code":12021,"msg":"Scope not found in CB datastore default:default.test (near line 1, column 15)"}"#,
+        );
+
+        assert_eq!(ServerErrorKind::ScopeNotFound, server_kind(&err));
+        let r = resource(&err);
+        assert_eq!(Some("default"), r.bucket_name());
+        assert_eq!(Some("test"), r.scope_name());
+        assert_eq!(None, r.collection_name());
+    }
+
+    /// Ported from cbcore-rs `test_parse_collection_not_found`.
+    ///
+    /// The path splits right to left, because a bucket name is the only one of
+    /// the three that may itself contain a dot.
+    #[test]
+    fn a_collection_not_found_message_names_all_three() {
+        let err = classify(
+            r#"{"code":12003,"msg":"Keyspace not found in CB datastore: default:default._default.test - cause: No such keyspace"}"#,
+        );
+
+        assert_eq!(ServerErrorKind::CollectionNotFound, server_kind(&err));
+        let r = resource(&err);
+        assert_eq!(Some("default"), r.bucket_name());
+        assert_eq!(Some("_default"), r.scope_name());
+        assert_eq!(Some("test"), r.collection_name());
+    }
+
+    /// Ported from cbcore-rs `test_parse_index_exists_msg`.
+    #[test]
+    fn an_index_exists_message_names_the_index() {
+        let err = classify(r#"{"code":4300,"msg":"The index NewIndex already exists."}"#);
+
+        assert_eq!(ServerErrorKind::IndexExists, server_kind(&err));
+        assert_eq!(Some("NewIndex"), resource(&err).index_name());
+    }
+
+    /// Ported from cbcore-rs `test_parse_index_not_found_msg`.
+    ///
+    /// The anchor is the lower-case word `index`, so the capitalised
+    /// `Index Not Found` at the front of the message is stepped over rather
+    /// than yielding `Not` as the index name.
+    #[test]
+    fn an_index_not_found_message_names_the_index() {
+        let err = classify(
+            r#"{"code":12004,"msg":"Index Not Found - cause: GSI index testingIndex not found."}"#,
+        );
+
+        assert_eq!(ServerErrorKind::IndexNotFound, server_kind(&err));
+        assert_eq!(Some("testingIndex"), resource(&err).index_name());
+    }
+
+    /// A message whose last word is `index` must not take the parser with it.
+    ///
+    /// cbcore-rs guards this with a bounds check
+    /// (src/services/query.rs::parse_index_not_found_or_exists_msg); the
+    /// equivalent here reached past the end of the iterator.
+    #[test]
+    fn a_message_ending_in_the_word_index_does_not_panic() {
+        let err = classify(r#"{"code":4300,"msg":"could not create index"}"#);
+
+        assert_eq!(ServerErrorKind::IndexExists, server_kind(&err));
+        assert_eq!(None, resource(&err).index_name());
+    }
+
+    /// Ported from cbcore-rs `test_parse_dml_cas_mismatch`: a DML failure with
+    /// no structured reason falls back to reading its message.
+    #[test]
+    fn a_dml_failure_with_no_reason_falls_back_to_its_message() {
+        let err = classify(r#"{"code":12009,"msg":"DML error - cause: CAS mismatch"}"#);
+        assert_eq!(ServerErrorKind::CasMismatch, server_kind(&err));
+    }
+
+    /// Ported from cbcore-rs `test_parse_dml_document_not_found`: when a
+    /// structured reason is present it decides, and the message is not read.
+    #[test]
+    fn a_dml_failure_reads_its_structured_reason_code() {
+        let err = classify(
+            r#"{"code":12009,"msg":"DML error","reason":{"code":17014,"message":"Key not found"}}"#,
+        );
+        assert_eq!(ServerErrorKind::DocNotFound, server_kind(&err));
+
+        let err = classify(
+            r#"{"code":12009,"msg":"DML error - cause: CAS mismatch","reason":{"code":17012}}"#,
+        );
+        assert_eq!(
+            ServerErrorKind::DocExists,
+            server_kind(&err),
+            "the structured reason must win over the message text"
+        );
+    }
+
+    /// Ported from cbcore-rs `an_index_that_already_exists_still_classifies`.
+    ///
+    /// A 5000 is a free-text bucket, so this arm is decided by matching the
+    /// message. That is the arm most easily broken by an over-greedy pattern
+    /// added beside it.
+    #[test]
+    fn an_index_that_already_exists_still_classifies() {
+        let err = classify(
+            r#"{"code":5000,"msg":"GSI CreateIndex() - cause: Index ix already exists."}"#,
+        );
+        assert_eq!(ServerErrorKind::IndexExists, server_kind(&err));
+
+        let err =
+            classify(r#"{"code":5000,"msg":"GSI DropIndex() - cause: Index ix does not exist."}"#);
+        assert_eq!(ServerErrorKind::IndexNotFound, server_kind(&err));
+
+        let err = classify(
+            r#"{"code":5000,"msg":"Build Already In Progress. Multiple concurrent index builds are not supported."}"#,
+        );
+        assert_eq!(ServerErrorKind::BuildAlreadyInProgress, server_kind(&err));
+    }
+
+    /// Ported from cbcore-rs
+    /// `a_wrapper_around_a_fatal_reason_is_not_made_transient_by_its_envelope`.
+    ///
+    /// The envelope of a 5000 mentions an index by name whatever went wrong
+    /// underneath. Only the carried reason may decide the classification, so a
+    /// wrapper carrying an unrecognised reason must stay `Internal` rather than
+    /// being read as an index that exists or is missing.
+    #[test]
+    fn a_wrapper_around_a_fatal_reason_is_not_made_transient_by_its_envelope() {
+        let err = classify(
+            r#"{"code":5000,"msg":"Index creation for index ix, bucket b, scope s, collection c cannot start. Reason: some other failure"}"#,
+        );
+        assert_eq!(ServerErrorKind::Internal, server_kind(&err));
+    }
+
+    async fn respreader(body: &'static str) -> error::Result<QueryRespReader> {
+        let http_resp = http::Response::builder()
+            .status(200)
+            .body(body.to_string())
+            .unwrap();
+        let resp = Response::from(reqwest::Response::from(http_resp));
+
+        QueryRespReader::new(resp, "localhost:8093", "SELECT 1", "ctx").await
+    }
+
+    /// Read a whole response into the rows it yielded and the error, if any,
+    /// that ended it.
+    ///
+    /// **Both ends are collected because the failure can arrive at either.**
+    /// A response with no rows has its epilog read during construction, so its
+    /// error comes back from `new`; a response with rows hands those over first
+    /// and fails from the stream. Either way it is an error, which is the point.
+    async fn drain(body: &'static str) -> (Vec<String>, Option<Error>) {
+        let mut reader = match respreader(body).await {
+            Ok(r) => r,
+            Err(e) => return (vec![], Some(e)),
+        };
+
+        let mut rows = vec![];
+        let mut error = None;
+
+        while let Some(item) = reader.next().await {
+            match item {
+                Ok(row) => rows.push(String::from_utf8_lossy(&row).to_string()),
+                Err(e) => {
+                    error = Some(e);
+                    break;
+                }
+            }
+        }
+
+        (rows, error)
+    }
+
+    const FATAL_WITH_NO_ROWS: &str = r#"{"requestID":"a","signature":{"*":"*"},"results":[
+    ],
+    "errors":[{"code":5010,"msg":"Error evaluating ExpressionScan"}],
+    "status":"fatal","metrics":{"elapsedTime":"1.1ms","executionTime":"1ms","resultCount":0,"resultSize":0,"errorCount":1}}"#;
+
+    const FATAL_AFTER_ROWS: &str = r#"{"requestID":"a","signature":{"*":"*"},"results":[
+    {"a":1},
+    {"a":2}
+    ],
+    "errors":[{"code":5010,"msg":"Error evaluating ExpressionScan"}],
+    "status":"fatal","metrics":{"elapsedTime":"1.1ms","executionTime":"1ms","resultCount":2,"resultSize":16,"errorCount":1}}"#;
+
+    const SUCCESS_WITH_ROWS: &str = r#"{"requestID":"a","signature":{"*":"*"},"results":[
+    {"a":1},
+    {"a":2}
+    ],
+    "status":"success","metrics":{"elapsedTime":"1.1ms","executionTime":"1ms","resultCount":2,"resultSize":16,"errorCount":0}}"#;
+
+    /// Ported from cbcore-rs
+    /// `a_failure_that_arrives_with_a_200_is_an_error_and_not_an_empty_answer`.
+    ///
+    /// The query service answers 200 and then fails in the body. An empty row
+    /// set and a failure look identical to a caller that only counts rows.
+    #[tokio::test]
+    async fn a_failure_that_arrives_with_a_200_is_an_error_and_not_an_empty_answer() {
+        let (rows, error) = drain(FATAL_WITH_NO_ROWS).await;
+
+        assert!(rows.is_empty(), "expected no rows, got {rows:?}");
+        let err = error.expect("a fatal response read as an empty answer");
+        assert_eq!(ServerErrorKind::Internal, server_kind(&err));
+        assert!(
+            err.to_string().contains("ExpressionScan"),
+            "the server's message was lost: {err}"
+        );
+    }
+
+    /// Ported from cbcore-rs `rows_already_sent_survive_the_error_that_follows_them`.
+    ///
+    /// Rows are handed over as they arrive, so a failure in the epilog must be
+    /// raised *after* them rather than in place of them.
+    #[tokio::test]
+    async fn rows_already_sent_survive_the_error_that_follows_them() {
+        let (rows, error) = drain(FATAL_AFTER_ROWS).await;
+
+        assert_eq!(vec![r#"{"a":1}"#, r#"{"a":2}"#], rows);
+        assert!(
+            error.is_some(),
+            "the error following the rows never reached the caller"
+        );
+    }
+
+    /// The control for the two above: an ordinary response yields its rows and
+    /// no error. Without it, a reader that always errored would pass them both.
+    #[tokio::test]
+    async fn rows_still_arrive_when_the_response_carries_no_error() {
+        let mut reader = respreader(SUCCESS_WITH_ROWS)
+            .await
+            .expect("the reader refused a clean 200");
+        let mut rows = vec![];
+        while let Some(item) = reader.next().await {
+            rows.push(String::from_utf8_lossy(&item.expect("unexpected error")).to_string());
+        }
+
+        assert_eq!(vec![r#"{"a":1}"#, r#"{"a":2}"#], rows);
+        let meta = reader.metadata().expect("no metadata");
+        assert_eq!(Status::Success, meta.status);
+    }
+
+    /// Ported from cbcore-rs `a_bracket_inside_an_error_message_does_not_end_the_array`.
+    ///
+    /// cbcore-rs hand-balances the brackets of the `errors` array and has to
+    /// track quoting to do it. Here the epilog boundary comes from the real
+    /// tokenizer, so this is correct by construction — but the regression it
+    /// guards against, a truncated epilog silently dropping the error, is worth
+    /// a case anyway.
+    #[tokio::test]
+    async fn a_bracket_inside_an_error_message_does_not_end_the_array() {
+        const BRACKETED: &str = r#"{"requestID":"a","results":[
+    ],
+    "errors":[{"code":13014,"msg":"User does not have credentials to run queries [see docs] on b] — check permissions"}],
+    "status":"fatal","metrics":{"elapsedTime":"1ms","executionTime":"1ms","errorCount":1}}"#;
+
+        let (rows, error) = drain(BRACKETED).await;
+
+        assert!(rows.is_empty());
+        let err = error.expect("the error was lost with the bracket");
+        assert!(
+            err.to_string().contains("see docs"),
+            "the message was truncated at the bracket: {err}"
+        );
     }
 }

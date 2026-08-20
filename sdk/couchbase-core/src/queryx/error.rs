@@ -386,12 +386,18 @@ impl ResourceError {
         // msg for index exists is of the form - "The index NewIndex already exists."
         while let Some(field) = fields.next() {
             if field == "index" {
+                // The server writes these messages, so "index" being the last
+                // word in one is not something this side gets to rule out.
+                // Report the error without a name rather than panicking inside
+                // error handling.
+                let index_name = fields.next().map(|name| name.to_string());
+
                 return ResourceError {
                     cause,
                     bucket_name: None,
                     scope_name: None,
                     collection_name: None,
-                    index_name: Some(fields.next().unwrap().to_string()),
+                    index_name,
                 };
             }
         }
@@ -619,8 +625,24 @@ pub enum ServerErrorKind {
     WriteInReadOnlyMode,
     ScopeNotFound,
     CollectionNotFound,
-    InvalidArgument { argument: String, reason: String },
+    InvalidArgument {
+        argument: String,
+        reason: String,
+    },
     BuildAlreadyInProgress,
+    /// The indexer accepted the build and then failed it, saying it will retry
+    /// on its own.
+    ///
+    /// Distinct from [`ServerErrorKind::BuildAlreadyInProgress`] because it is a
+    /// different sentence from the server, and distinct from
+    /// [`ServerErrorKind::Internal`] because a caller that reads it as a failure
+    /// reports one for a build the server has already undertaken to finish.
+    BuildFails,
+    /// Another request is creating an index on the same keyspace.
+    ///
+    /// Its own kind because the recovery is to wait and try again, and under a
+    /// fleet doing DDL at once this is the ordinary case rather than a fault.
+    ConcurrentOperation,
     Unknown,
 }
 
@@ -653,6 +675,8 @@ impl Display for ServerErrorKind {
                 "server invalid argument: (argument: {argument}, reason: {reason})"
             ),
             ServerErrorKind::BuildAlreadyInProgress => write!(f, "build already in progress"),
+            ServerErrorKind::BuildFails => write!(f, "build failed and will be retried"),
+            ServerErrorKind::ConcurrentOperation => write!(f, "concurrent index operation"),
             ServerErrorKind::Unknown => write!(f, "unknown query error"),
         }
     }
@@ -910,7 +934,64 @@ impl MetricsName for ServerErrorKind {
             ServerErrorKind::CollectionNotFound => "queryx.CollectionNotFound",
             ServerErrorKind::InvalidArgument { .. } => "queryx.InvalidArgument",
             ServerErrorKind::BuildAlreadyInProgress => "queryx.BuildAlreadyInProgress",
+            ServerErrorKind::BuildFails => "queryx.BuildFails",
+            ServerErrorKind::ConcurrentOperation => "queryx.ConcurrentOperation",
             ServerErrorKind::Unknown => "queryx._OTHER",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::queryx::error::{ResourceError, ServerError, ServerErrorKind};
+    use http::StatusCode;
+
+    fn server_error(msg: &str) -> ServerError {
+        ServerError::new(
+            ServerErrorKind::IndexNotFound,
+            "localhost:8093",
+            StatusCode::OK,
+            12016,
+            false,
+            msg,
+        )
+    }
+
+    #[test]
+    fn an_index_name_is_taken_from_the_message() {
+        let parsed = ResourceError::parse_index_not_found_or_exists(server_error(
+            "Index Not Found - cause: GSI index testingIndex not found.",
+        ));
+
+        assert_eq!(parsed.index_name(), Some("testingIndex"));
+    }
+
+    #[test]
+    fn the_other_message_shape_is_read_too() {
+        let parsed = ResourceError::parse_index_not_found_or_exists(server_error(
+            "The index NewIndex already exists.",
+        ));
+
+        assert_eq!(parsed.index_name(), Some("NewIndex"));
+    }
+
+    /// The server writes these messages, so this side does not get to rule out
+    /// "index" being the last word in one. It used to panic inside error
+    /// handling.
+    #[test]
+    fn a_message_ending_in_index_is_reported_without_a_name() {
+        let parsed = ResourceError::parse_index_not_found_or_exists(server_error(
+            "could not build the index",
+        ));
+
+        assert_eq!(parsed.index_name(), None);
+    }
+
+    #[test]
+    fn a_message_that_never_says_index_is_reported_without_a_name() {
+        let parsed =
+            ResourceError::parse_index_not_found_or_exists(server_error("something else entirely"));
+
+        assert_eq!(parsed.index_name(), None);
     }
 }

@@ -144,21 +144,18 @@ impl ExponentialBackoffCalculator {
 impl BackoffCalculator for ExponentialBackoffCalculator {
     fn backoff(&self, retry_attempts: u32) -> Duration {
         let factor = self.backoff_factor.powi(retry_attempts as i32);
-        let factor_u128 = factor as u128;
 
-        if u128::MAX / self.min.as_millis() < factor_u128 {
-            // If the factor is too large, we cap it to prevent overflow.
+        // Multiply before narrowing. Casting the factor to an integer first
+        // truncated it, so the 1.5 every caller passes became 1, 1, 2, 3, 5, 7,
+        // 11 -- a schedule that is neither the documented one above nor
+        // monotonic in the factor: 1.5 and 1.9 produced identical backoffs.
+        let millis = self.min.as_millis() as f64 * factor;
+
+        if !millis.is_finite() || millis >= u64::MAX as f64 {
             return self.max;
         }
 
-        let val = self.min.as_millis() * factor_u128;
-
-        if val > u64::MAX as u128 {
-            // If the value exceeds u64::MAX, we cap it to max.
-            return self.max;
-        }
-
-        let mut backoff = Duration::from_millis(val as u64);
+        let mut backoff = Duration::from_millis(millis as u64);
 
         if backoff > self.max {
             backoff = self.max;
@@ -201,6 +198,45 @@ mod tests {
         assert_eq!(calculator.backoff(5), Duration::from_millis(320));
         assert_eq!(calculator.backoff(6), Duration::from_millis(640));
         assert_eq!(calculator.backoff(7), Duration::from_millis(1000));
+    }
+
+    /// 1.5 is the factor every `ensure_*` poll in the crate passes, and it is
+    /// the case the 2.0 test above cannot see: truncating the factor to an
+    /// integer turned this schedule into 100/100/200/300/500/700.
+    #[test]
+    fn a_fractional_factor_is_not_truncated() {
+        let calculator = ExponentialBackoffCalculator::new(
+            Duration::from_millis(100),
+            Duration::from_millis(1000),
+            1.5,
+        );
+
+        assert_eq!(calculator.backoff(0), Duration::from_millis(100));
+        assert_eq!(calculator.backoff(1), Duration::from_millis(150));
+        assert_eq!(calculator.backoff(2), Duration::from_millis(225));
+        assert_eq!(calculator.backoff(3), Duration::from_millis(337));
+        assert_eq!(calculator.backoff(4), Duration::from_millis(506));
+        assert_eq!(calculator.backoff(5), Duration::from_millis(759));
+        // 1139ms, past the ceiling.
+        assert_eq!(calculator.backoff(6), Duration::from_millis(1000));
+    }
+
+    /// Truncation also made the calculator insensitive to its own argument:
+    /// every factor in [1.5, 2.0) produced the same schedule.
+    #[test]
+    fn two_different_factors_give_two_different_schedules() {
+        let gentle = ExponentialBackoffCalculator::new(
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+            1.5,
+        );
+        let steep = ExponentialBackoffCalculator::new(
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+            1.9,
+        );
+
+        assert_ne!(gentle.backoff(3), steep.backoff(3));
     }
 
     #[test]

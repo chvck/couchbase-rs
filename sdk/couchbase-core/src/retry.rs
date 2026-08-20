@@ -488,8 +488,10 @@ pub(crate) fn controlled_backoff(retry_attempts: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Result;
     use crate::queryx;
     use http::StatusCode;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn make_retry_manager() -> Arc<RetryManager> {
         Arc::new(RetryManager::new(Arc::new(ErrMapComponent::default())))
@@ -558,5 +560,118 @@ mod tests {
     #[test]
     fn test_query_error_retryable_does_not_always_retry() {
         assert!(!RetryReason::QueryErrorRetryable.always_retry());
+    }
+    /// Ported from cbcore-rs `src/retry/manager.rs::test_orchestrate_retries`.
+    ///
+    /// The six tests above pin which errors are *classified* as retryable. None
+    /// of them runs the loop, so nothing pinned that a retryable failure is
+    /// actually re-attempted, that the retry stops as soon as the operation
+    /// succeeds, or that the strategy is consulted once per failure.
+    #[tokio::test]
+    async fn a_retryable_failure_is_re_attempted_until_it_succeeds() {
+        let strategy = CountingStrategy::always();
+        let calls = Arc::new(AtomicU32::new(0));
+
+        let calls_for_op = calls.clone();
+        let res: Result<&str> = orchestrate_retries(
+            make_retry_manager(),
+            strategy.clone() as Arc<dyn RetryStrategy>,
+            RetryRequest::new("test", true),
+            || {
+                let calls = calls_for_op.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                        Err(make_query_server_error(
+                            queryx::error::ServerErrorKind::Internal,
+                            true,
+                        ))
+                    } else {
+                        Ok("done")
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!("done", res.unwrap());
+        assert_eq!(3, calls.load(Ordering::SeqCst), "operation call count");
+        assert_eq!(2, strategy.consultations(), "strategy consultations");
+    }
+
+    /// The other end of the same loop: when the strategy declines, the caller
+    /// gets the error — and it carries how many attempts were spent on it.
+    #[tokio::test]
+    async fn a_strategy_that_declines_ends_the_loop_and_reports_the_attempts() {
+        let strategy = CountingStrategy::giving_up_after(2);
+        let calls = Arc::new(AtomicU32::new(0));
+
+        let calls_for_op = calls.clone();
+        let res: Result<&str> = orchestrate_retries(
+            make_retry_manager(),
+            strategy.clone() as Arc<dyn RetryStrategy>,
+            RetryRequest::new("test", true),
+            || {
+                let calls = calls_for_op.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err(make_query_server_error(
+                        queryx::error::ServerErrorKind::Internal,
+                        true,
+                    ))
+                }
+            },
+        )
+        .await;
+
+        let err = res.expect_err("expected the failure to reach the caller");
+        assert_eq!(3, calls.load(Ordering::SeqCst), "operation call count");
+        assert_eq!(
+            Some(2),
+            err.retry_info().map(|r| r.retry_attempts()),
+            "the error should carry its retry history, got {err:?}"
+        );
+    }
+
+    /// A strategy that answers every failure, counting how often it was asked
+    /// and optionally giving up after a fixed number of retries.
+    #[derive(Debug)]
+    struct CountingStrategy {
+        consultations: AtomicU32,
+        max_retries: Option<u32>,
+    }
+
+    impl CountingStrategy {
+        fn always() -> Arc<Self> {
+            Arc::new(Self {
+                consultations: AtomicU32::new(0),
+                max_retries: None,
+            })
+        }
+
+        fn giving_up_after(max_retries: u32) -> Arc<Self> {
+            Arc::new(Self {
+                consultations: AtomicU32::new(0),
+                max_retries: Some(max_retries),
+            })
+        }
+
+        fn consultations(&self) -> u32 {
+            self.consultations.load(Ordering::SeqCst)
+        }
+    }
+
+    impl RetryStrategy for CountingStrategy {
+        fn retry_after(
+            &self,
+            request: &RetryRequest,
+            _reason: &RetryReason,
+        ) -> Option<RetryAction> {
+            self.consultations.fetch_add(1, Ordering::SeqCst);
+
+            match self.max_retries {
+                Some(max) if request.retry_attempts() >= max => None,
+                _ => Some(RetryAction::new(Duration::ZERO)),
+            }
+        }
     }
 }
