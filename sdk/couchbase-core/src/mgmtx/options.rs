@@ -93,6 +93,12 @@ pub struct GetFullClusterConfigOptions<'a> {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[non_exhaustive]
+pub struct GetClusterInfoOptions<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct GetTerseBucketConfigOptions<'a> {
     pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
     pub bucket_name: &'a str,

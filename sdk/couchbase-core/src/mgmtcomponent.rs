@@ -17,7 +17,7 @@
  */
 
 use crate::authenticator::Authenticator;
-use crate::cbconfig::{CollectionManifest, FullBucketConfig, FullClusterConfig};
+use crate::cbconfig::{ClusterInfo, CollectionManifest, FullBucketConfig, FullClusterConfig};
 use crate::componentconfigs::NetworkAndCanonicalEndpoint;
 use crate::error::ErrorKind;
 use crate::httpcomponent::{HttpComponent, HttpComponentState};
@@ -47,12 +47,12 @@ use crate::options::management::{
     DeleteScopeOptions, DeleteUserOptions, EnsureBucketOptions, EnsureGroupOptions,
     EnsureManifestOptions, EnsureUserOptions, FlushBucketOptions, GetAllBucketsOptions,
     GetAllGroupsOptions, GetAllUsersOptions, GetAutoFailoverSettingsOptions, GetBucketOptions,
-    GetBucketStatsOptions, GetCollectionManifestOptions, GetFullBucketConfigOptions,
-    GetFullClusterConfigOptions, GetGroupOptions, GetMetaKv2DirOptions, GetMetaKv2Options,
-    GetRolesOptions, GetUserOptions, IndexStatusOptions, LoadSampleBucketOptions,
-    MayManageLocalUsersOptions, SetMetaKv2MultipleOptions, SetMetaKv2Options,
-    SyncMetaKv2QuorumOptions, UpdateBucketOptions, UpdateCollectionOptions, UpsertGroupOptions,
-    UpsertUserOptions,
+    GetBucketStatsOptions, GetClusterInfoOptions, GetCollectionManifestOptions,
+    GetFullBucketConfigOptions, GetFullClusterConfigOptions, GetGroupOptions, GetMetaKv2DirOptions,
+    GetMetaKv2Options, GetRolesOptions, GetUserOptions, IndexStatusOptions,
+    LoadSampleBucketOptions, MayManageLocalUsersOptions, SetMetaKv2MultipleOptions,
+    SetMetaKv2Options, SyncMetaKv2QuorumOptions, UpdateBucketOptions, UpdateCollectionOptions,
+    UpsertGroupOptions, UpsertUserOptions,
 };
 use crate::retry::{orchestrate_retries, RetryManager, RetryRequest};
 use crate::retrybesteffort::ExponentialBackoffCalculator;
@@ -1156,6 +1156,45 @@ impl<C: Client> MgmtComponent<C> {
                                 tracing: Default::default(),
                             }
                             .get_full_cluster_config(&copts)
+                            .await
+                            .map_err(|e| ErrorKind::Mgmt(e).into())
+                        },
+                    )
+                    .await
+            },
+        )
+        .await
+    }
+
+    pub async fn get_cluster_info(
+        &self,
+        opts: &GetClusterInfoOptions<'_>,
+    ) -> error::Result<ClusterInfo> {
+        let retry_info = RetryRequest::new("get_cluster_info", false);
+        let copts = opts.into();
+
+        orchestrate_retries(
+            self.retry_manager.clone(),
+            opts.retry_strategy.clone(),
+            retry_info,
+            async || {
+                self.http_component
+                    .orchestrate_endpoint(
+                        None,
+                        async |client: Arc<C>,
+                               endpoint_id: String,
+                               endpoint: String,
+                               canonical_endpoint: String,
+                               auth: Auth| {
+                            mgmtx::mgmt::Management::<C> {
+                                http_client: client,
+                                user_agent: self.http_component.user_agent().to_string(),
+                                endpoint,
+                                canonical_endpoint,
+                                auth,
+                                tracing: Default::default(),
+                            }
+                            .get_cluster_info(&copts)
                             .await
                             .map_err(|e| ErrorKind::Mgmt(e).into())
                         },

@@ -16,7 +16,7 @@
  *
  */
 use crate::agent::{Agent, AgentInner};
-use crate::cbconfig::{CollectionManifest, FullBucketConfig, FullClusterConfig};
+use crate::cbconfig::{ClusterInfo, CollectionManifest, FullBucketConfig, FullClusterConfig};
 use crate::clusterlabels::ClusterLabels;
 use crate::error::Result;
 use crate::features::BucketFeature;
@@ -45,12 +45,12 @@ use crate::options::management::{
     DeleteScopeOptions, DeleteUserOptions, EnsureBucketOptions, EnsureGroupOptions,
     EnsureManifestOptions, EnsureUserOptions, FlushBucketOptions, GetAllBucketsOptions,
     GetAllGroupsOptions, GetAllUsersOptions, GetAutoFailoverSettingsOptions, GetBucketOptions,
-    GetBucketStatsOptions, GetCollectionManifestOptions, GetFullBucketConfigOptions,
-    GetFullClusterConfigOptions, GetGroupOptions, GetMetaKv2DirOptions, GetMetaKv2Options,
-    GetRolesOptions, GetUserOptions, IndexStatusOptions, LoadSampleBucketOptions,
-    MayManageLocalUsersOptions, SetMetaKv2MultipleOptions, SetMetaKv2Options,
-    SyncMetaKv2QuorumOptions, UpdateBucketOptions, UpdateCollectionOptions, UpsertGroupOptions,
-    UpsertUserOptions,
+    GetBucketStatsOptions, GetClusterInfoOptions, GetCollectionManifestOptions,
+    GetFullBucketConfigOptions, GetFullClusterConfigOptions, GetGroupOptions, GetMetaKv2DirOptions,
+    GetMetaKv2Options, GetRolesOptions, GetUserOptions, IndexStatusOptions,
+    LoadSampleBucketOptions, MayManageLocalUsersOptions, SetMetaKv2MultipleOptions,
+    SetMetaKv2Options, SyncMetaKv2QuorumOptions, UpdateBucketOptions, UpdateCollectionOptions,
+    UpsertGroupOptions, UpsertUserOptions,
 };
 use crate::options::ping::PingOptions;
 use crate::options::query::{
@@ -1471,6 +1471,15 @@ impl Agent {
         opts: &GetFullClusterConfigOptions<'_>,
     ) -> Result<FullClusterConfig> {
         self.inner.mgmt.get_full_cluster_config(opts).await
+    }
+
+    /// The cluster's uuid, from `/pools`.
+    ///
+    /// **Not on [`Self::get_full_cluster_config`]**, which reads `/pools/default`
+    /// — the topology is there and the uuid is not. A caller that has to tell one
+    /// cluster from another needs this one.
+    pub async fn get_cluster_info(&self, opts: &GetClusterInfoOptions<'_>) -> Result<ClusterInfo> {
+        self.inner.mgmt.get_cluster_info(opts).await
     }
 
     pub async fn load_sample_bucket(&self, opts: &LoadSampleBucketOptions<'_>) -> Result<()> {

@@ -16,16 +16,16 @@
  *
  */
 
-use crate::cbconfig::{FullBucketConfig, FullClusterConfig, TerseConfig};
+use crate::cbconfig::{ClusterInfo, FullBucketConfig, FullClusterConfig, TerseConfig};
 use crate::httpx::client::Client;
 use crate::httpx::request::{Auth, OnBehalfOfInfo, Request};
 use crate::httpx::response::Response;
 use crate::mgmtx::error;
 use crate::mgmtx::mgmt_query::IndexStatus;
 use crate::mgmtx::options::{
-    GetAutoFailoverSettingsOptions, GetBucketStatsOptions, GetFullBucketConfigOptions,
-    GetFullClusterConfigOptions, GetTerseBucketConfigOptions, GetTerseClusterConfigOptions,
-    IndexStatusOptions, LoadSampleBucketOptions,
+    GetAutoFailoverSettingsOptions, GetBucketStatsOptions, GetClusterInfoOptions,
+    GetFullBucketConfigOptions, GetFullClusterConfigOptions, GetTerseBucketConfigOptions,
+    GetTerseClusterConfigOptions, IndexStatusOptions, LoadSampleBucketOptions,
 };
 use crate::tracingcomponent::TracingComponent;
 use bytes::Bytes;
@@ -268,6 +268,36 @@ impl<C: Client> Management<C> {
             return Err(
                 Self::decode_common_error(method, path, "get_full_cluster_config", resp).await,
             );
+        }
+
+        parse_response_json(resp).await
+    }
+
+    /// `/pools`, for the cluster's uuid.
+    ///
+    /// A separate call from [`Self::get_full_cluster_config`] because it is a
+    /// separate endpoint: `/pools/default` carries the topology and no uuid,
+    /// and `/pools` carries the uuid and no topology.
+    pub async fn get_cluster_info(
+        &self,
+        opts: &GetClusterInfoOptions<'_>,
+    ) -> error::Result<ClusterInfo> {
+        let method = Method::GET;
+        let path = "pools".to_string();
+
+        let resp = self
+            .execute(
+                method.clone(),
+                &path,
+                "",
+                opts.on_behalf_of_info.cloned(),
+                None,
+                None,
+            )
+            .await?;
+
+        if resp.status() != 200 {
+            return Err(Self::decode_common_error(method, path, "get_cluster_info", resp).await);
         }
 
         parse_response_json(resp).await

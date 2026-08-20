@@ -1084,6 +1084,48 @@ pub struct GetFullClusterConfigOptions<'a> {
     pub retry_strategy: Arc<dyn RetryStrategy>,
 }
 
+/// Read `/pools`, which is where the cluster's uuid is.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct GetClusterInfoOptions<'a> {
+    pub on_behalf_of_info: Option<&'a OnBehalfOfInfo>,
+
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl Default for GetClusterInfoOptions<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> GetClusterInfoOptions<'a> {
+    pub fn new() -> Self {
+        Self {
+            on_behalf_of_info: None,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+
+    pub fn on_behalf_of_info(mut self, on_behalf_of_info: &'a OnBehalfOfInfo) -> Self {
+        self.on_behalf_of_info = Some(on_behalf_of_info);
+        self
+    }
+
+    pub fn retry_strategy(mut self, retry_strategy: Arc<dyn RetryStrategy>) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+}
+
+impl<'a> From<&'a GetClusterInfoOptions<'a>> for crate::mgmtx::options::GetClusterInfoOptions<'a> {
+    fn from(opts: &'a GetClusterInfoOptions<'a>) -> Self {
+        Self {
+            on_behalf_of_info: opts.on_behalf_of_info,
+        }
+    }
+}
+
 impl<'a> Default for GetFullClusterConfigOptions<'a> {
     fn default() -> Self {
         Self::new()

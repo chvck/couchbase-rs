@@ -505,6 +505,21 @@ pub struct BucketNames {
     pub uuid: String,
 }
 
+/// What `/pools` says about the cluster as a whole.
+///
+/// **The uuid is the whole reason this exists.** It is not on `/pools/default`,
+/// which is where [`FullClusterConfig`] comes from, so a caller that needs to
+/// tell one cluster from another — a gateway keying a shared registry by
+/// cluster, say — had no typed route to it and would otherwise hand-roll the
+/// request.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ClusterInfo {
+    /// Absent on a cluster that has not been initialised.
+    #[serde(default)]
+    pub uuid: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FullClusterConfig {
     #[serde(default)]

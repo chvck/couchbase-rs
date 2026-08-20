@@ -474,3 +474,27 @@ fn the_raw_cluster_and_bucket_documents_still_parse() {
         assert!(bucket.num_vbuckets.unwrap_or_default() > 0);
     });
 }
+
+/// **The cluster's uuid, which `/pools/default` does not carry.**
+///
+/// A caller that has to tell one cluster from another — a gateway keying a
+/// shared registry by cluster, so that two deployments attached to same-named
+/// buckets in different clusters do not merge into one — needs this and had no
+/// typed route to it. Asserted against a real cluster because the field is
+/// `Option`: a parse that silently found nothing would look identical to a
+/// cluster that had none.
+#[test]
+fn the_cluster_reports_a_uuid() {
+    run_test(async |agent| {
+        let info = agent
+            .get_cluster_info(&couchbase_core::options::management::GetClusterInfoOptions::new())
+            .await
+            .unwrap();
+
+        let uuid = info.uuid.expect("an initialised cluster has a uuid");
+        assert!(
+            !uuid.is_empty() && uuid.chars().all(|c| c.is_ascii_hexdigit()),
+            "a uuid is non-empty hex: {uuid:?}"
+        );
+    });
+}
