@@ -58,6 +58,17 @@ pub struct TerseExtNodePorts {
     pub eventing: Option<u16>,
     #[serde(alias = "indexHttp")]
     pub gsi: Option<u16>,
+    /// The queryport — where index *scans* go, as distinct from `indexHttp`,
+    /// which is the indexing service's REST API. [`crate::indexerx`] needs this
+    /// one.
+    ///
+    /// **There is no `indexScanSSL`.** Captured from 8.0.3's
+    /// `/pools/default/b/<bucket>`: `nodesExt` advertises `indexScan`,
+    /// `indexHttp` and `indexHttps` and no fourth index port, so a TLS
+    /// queryport is the same port reached over TLS. That is why there is no
+    /// `index_scan_ssl` beside it.
+    #[serde(alias = "indexScan")]
+    pub index_scan: Option<u16>,
     #[serde(alias = "backupAPI")]
     pub backup: Option<u16>,
 

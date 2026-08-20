@@ -18,6 +18,8 @@
 
 use crate::analyticsx::error::Error as AnalyticsError;
 use crate::httpx::error::Error as HttpError;
+use crate::indexerx::error::Error as IndexerError;
+use crate::indexrouter::RouteError;
 use crate::memdx;
 use crate::mgmtx::error::Error as MgmtError;
 use crate::queryx::error::Error as QueryError;
@@ -55,6 +57,7 @@ impl StdError for Error {
             ErrorKind::Search(err) => err.source(),
             ErrorKind::Http(err) => err.source(),
             ErrorKind::Mgmt(err) => err.source(),
+            ErrorKind::Indexer(err) => err.source(),
             _ => None,
         }
     }
@@ -125,6 +128,13 @@ pub enum ErrorKind {
     Search(SearchError),
     Http(HttpError),
     Mgmt(MgmtError),
+    Indexer(IndexerError),
+    /// A scan could not be routed to an indexer. Distinct from
+    /// [`ErrorKind::Indexer`], which is what an indexer said: this is a
+    /// disagreement between the index topology this client holds and the
+    /// cluster, and [`RouteError::worth_refreshing`] is how a caller tells the
+    /// two apart without reading any strings.
+    IndexRouting(RouteError),
     VbucketMapOutdated,
     #[non_exhaustive]
     InvalidArgument {
@@ -199,6 +209,8 @@ impl Display for ErrorKind {
             ErrorKind::Search(err) => write!(f, "{err}"),
             ErrorKind::Http(err) => write!(f, "{err}"),
             ErrorKind::Mgmt(err) => write!(f, "{err}"),
+            ErrorKind::Indexer(err) => write!(f, "{err}"),
+            ErrorKind::IndexRouting(err) => write!(f, "{err}"),
             ErrorKind::EndpointNotKnown { endpoint } => {
                 write!(f, "endpoint not known: {endpoint}")
             }
@@ -261,6 +273,8 @@ impl MetricsName for ErrorKind {
             ErrorKind::Search(err) => err.metrics_name(),
             ErrorKind::Http(err) => err.metrics_name(),
             ErrorKind::Mgmt(err) => err.metrics_name(),
+            ErrorKind::Indexer(err) => err.metrics_name(),
+            ErrorKind::IndexRouting(_) => "IndexRouting",
             ErrorKind::InvalidArgument { .. } => "InvalidArgument",
             ErrorKind::ServiceNotAvailable { .. } => "ServiceNotAvailable",
             ErrorKind::FeatureNotAvailable { .. } => "FeatureNotAvailable",
@@ -434,5 +448,11 @@ impl From<SearchError> for Error {
 impl From<MgmtError> for Error {
     fn from(value: MgmtError) -> Self {
         Self::new(ErrorKind::Mgmt(value))
+    }
+}
+
+impl From<IndexerError> for Error {
+    fn from(value: IndexerError) -> Self {
+        Self::new(ErrorKind::Indexer(value))
     }
 }

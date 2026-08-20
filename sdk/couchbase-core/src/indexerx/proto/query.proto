@@ -1,0 +1,203 @@
+/*
+ *
+ *  * Copyright (c) 2025 Couchbase, Inc.
+ *  *
+ *  * Licensed under the Apache License, Version 2.0 (the "License");
+ *  * you may not use this file except in compliance with the License.
+ *  * You may obtain a copy of the License at
+ *  *
+ *  *    http://www.apache.org/licenses/LICENSE-2.0
+ *  *
+ *  * Unless required by applicable law or agreed to in writing, software
+ *  * distributed under the License is distributed on an "AS IS" BASIS,
+ *  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  * See the License for the specific language governing permissions and
+ *  * limitations under the License.
+ *
+ */
+
+// The queryport wire schema, trimmed to what indexerx uses.
+//
+// Transcribed from indexing/secondary/protobuf/query/query.proto. Field numbers
+// and names are load-bearing and must match the original exactly — this is a
+// subset of someone else's schema, not a schema of our own.
+//
+// Omitted deliberately, and each omission is a scope decision:
+//
+//   IndexVector, IndexKeyOrder      vector search
+//   GroupAggr, GroupKey, Aggregate  pushed-down aggregation beyond a count
+//   SrvrScanReport and friends      server scan reports
+//   StatisticsRequest/Response      index statistics
+//
+// Fields of retained messages that belong to those features are kept as
+// reserved field numbers rather than deleted, so that adding one later cannot
+// silently reuse a tag.
+
+syntax = "proto2";
+
+package protoQuery;
+
+// Error is carried inside a response rather than replacing it. An empty string
+// means success, which is why the parse layer checks the string and not merely
+// the presence of the message.
+message Error {
+    required string error = 1;
+}
+
+message TsConsistency {
+    repeated uint32 vbnos   = 1;
+    repeated uint64 seqnos  = 2;
+    repeated uint64 vbuuids = 3;
+    optional uint64 crc64   = 4;
+}
+
+// Exactly one of the optional fields is set. Which one is what the payload
+// "is"; proto2 cannot express that, so parse::payload does.
+message QueryPayload {
+    required uint32             version           = 1;
+    optional ScanRequest        scanRequest       = 4;
+    optional ScanAllRequest     scanAllRequest    = 5;
+    optional ResponseStream     stream            = 6;
+    optional CountRequest       countRequest      = 7;
+    optional CountResponse      countResponse     = 8;
+    optional EndStreamRequest   endStream         = 9;
+    optional StreamEndResponse  streamEnd         = 10;
+    optional HeloRequest        heloRequest       = 11;
+    optional HeloResponse       heloResponse      = 12;
+    optional AuthRequest        authRequest       = 13;
+    optional AuthResponse       authResponse      = 14;
+
+    reserved 2, 3;  // statisticsRequest, statistics
+}
+
+message HeloRequest {
+    required uint32 version = 1;
+}
+
+message HeloResponse {
+    required uint32 version = 1;
+}
+
+message ScanRequest {
+    required uint64          defnID          = 1;
+    required Span            span            = 2;
+    required bool            distinct        = 3;
+    required int64           limit           = 4;
+    required uint32          cons            = 5;
+    optional TsConsistency   tsVector        = 6;
+    optional string          requestId       = 7;
+    repeated Scan            scans           = 8;
+    optional IndexProjection indexprojection = 9;
+    optional bool            reverse         = 10;
+    optional int64           offset          = 11;
+    optional int64           rollbackTime    = 12;
+    repeated uint64          partitionIds    = 13;
+    optional bool            sorted          = 15;
+    optional uint32          dataEncFmt      = 16;
+    optional string          user            = 17;
+    optional bool            skipReadMetering = 18;
+    optional int64           ReqTimeout      = 20;
+    repeated string          indexKeyNames   = 22;
+    optional string          inlineFilter    = 23;
+
+    reserved 14, 19, 21, 24, 25;
+}
+
+message ScanAllRequest {
+    required uint64        defnID       = 1;
+    required int64         limit        = 2;
+    required uint32        cons         = 3;
+    optional TsConsistency tsVector     = 4;
+    optional string        requestId    = 5;
+    optional int64         rollbackTime = 6;
+    repeated uint64        partitionIds = 7;
+    optional uint32        dataEncFmt   = 8;
+    optional string        user         = 9;
+    optional bool          skipReadMetering = 10;
+    optional int64         ReqTimeout   = 12;
+
+    reserved 11, 13;
+}
+
+message EndStreamRequest {
+}
+
+message ResponseStream {
+    repeated IndexEntry indexEntries = 1;
+    optional Error      err          = 2;
+
+    reserved 3;
+}
+
+message StreamEndResponse {
+    optional Error  err       = 1;
+    optional uint64 readUnits = 2;
+
+    reserved 3;
+}
+
+message CountRequest {
+    required uint64        defnID           = 1;
+    required Span          span             = 2;
+    required uint32        cons             = 3;
+    optional TsConsistency TsVector         = 4;
+    optional string        requestId        = 5;
+    optional bool          distinct         = 6;
+    repeated Scan          scans            = 7;
+    optional int64         rollbackTime     = 8;
+    repeated uint64        partitionIds     = 9;
+    optional bool          skipReadMetering = 10;
+    optional string        user             = 11;
+    optional int64         ReqTimeout       = 12;
+}
+
+message CountResponse {
+    required int64 count = 1;
+    optional Error err   = 2;
+}
+
+// Span is required on a ScanRequest even when `scans` carries the real bounds,
+// in which case it is sent empty. proto2 required means it cannot be omitted.
+message Span {
+    optional Range range  = 1;
+    repeated bytes equals = 2;
+}
+
+message Range {
+    optional bytes  low       = 1;
+    optional bytes  high      = 2;
+    required uint32 inclusion = 3;
+}
+
+// low and high are JSON, not collatejson — the indexer encodes them. An
+// unbounded end is omitted rather than encoded as a sentinel.
+message CompositeElementFilter {
+    optional bytes  low       = 1;
+    optional bytes  high      = 2;
+    required uint32 inclusion = 3;
+}
+
+message Scan {
+    repeated CompositeElementFilter filters = 1;
+    repeated bytes                  equals  = 2;
+}
+
+message IndexProjection {
+    repeated int64 EntryKeys  = 1;
+    optional bool  PrimaryKey = 2;
+}
+
+message IndexEntry {
+    optional bytes entryKey   = 1;
+    required bytes primaryKey = 2;
+}
+
+message AuthRequest {
+    required string user          = 1;
+    required string pass          = 2;
+    optional uint32 clientVersion = 3;
+}
+
+message AuthResponse {
+    required uint32 code = 1;
+}

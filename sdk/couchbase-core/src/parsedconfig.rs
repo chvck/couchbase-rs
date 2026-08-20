@@ -35,6 +35,12 @@ pub(crate) struct ParsedConfigNodePorts {
     pub analytics: Option<u16>,
     pub query: Option<u16>,
     pub search: Option<u16>,
+    /// The indexing service's REST API — `/getIndexStatus` and index DDL.
+    pub index_http: Option<u16>,
+    /// The queryport, where index scans go. The **same port on both sides**:
+    /// the server advertises no `indexScanSSL`, so the SSL set repeats it. See
+    /// [`crate::cbconfig::TerseExtNodePorts::index_scan`].
+    pub index_scan: Option<u16>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
