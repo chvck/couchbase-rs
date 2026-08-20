@@ -140,7 +140,27 @@ type AgentCollectionResolver = CollectionResolverCached<CollectionResolverMemd<A
 
 pub(crate) struct AgentInner {
     state: Arc<Mutex<AgentState>>,
+
+    /// The `(rev_epoch, rev_id)` of the most recently applied config, kept
+    /// outside `state`'s mutex on purpose: `apply_config` holds that mutex for
+    /// the whole of `update_state_locked`, which re-dials endpoints over the
+    /// network, so a reader who waited on the same lock would block for as
+    /// long as the reconfiguration it wants to learn about, i.e. through most
+    /// of a failover. Reading an `ArcSwap` never blocks on that lock at all.
+    ///
+    /// Stored only once `update_state_locked` has finished — not the moment
+    /// `state.latest_config` is written — because `vb_router`'s routing info
+    /// (also an `ArcSwap`, read by ops without touching `state`) does not flip
+    /// to the new topology until partway through that call. Publishing the
+    /// revision any earlier would let a caller observe the new revision while
+    /// still being routed against the old vbucket map.
+    latest_config_revision: ArcSwap<Option<(i64, i64)>>,
     bucket: Option<String>,
+
+    /// The per-agent vbucket-UUID cache a scan vector reads through
+    /// [`Agent::vbuuid_map`] — see `vbuuid_cache` for why it is cached at all
+    /// and what may invalidate it.
+    pub(crate) vbuuids: crate::vbuuid_cache::VbUuidCache,
 
     cfg_manager: Arc<ConfigManagerMemd<AgentClientManager>>,
     conn_mgr: Arc<AgentClientManager>,
@@ -235,9 +255,25 @@ impl AgentInner {
             rev_id = config.rev_id,
             rev_epoch = config.rev_epoch
         );
+        let revision = (config.rev_epoch, config.rev_id);
         state.latest_config = config;
 
         self.update_state_locked(&mut state).await;
+
+        // Stored only now, after update_state_locked has flipped vb_router's
+        // routing info to the new topology: publishing earlier would let a
+        // caller see the new revision while ops were still routed against the
+        // old vbucket map, which is exactly backwards for a cache key meant to
+        // change only when the map it keys does.
+        self.latest_config_revision.store(Arc::new(Some(revision)));
+    }
+
+    /// The `(rev_epoch, rev_id)` of the config this agent last applied.
+    ///
+    /// `None` before the first config arrives. See `latest_config_revision`
+    /// for why this reads a separate `ArcSwap` rather than `state`.
+    pub(crate) fn config_revision(&self) -> Option<(i64, i64)> {
+        **self.latest_config_revision.load()
     }
 
     async fn update_state_locked(&self, state: &mut AgentState) {
@@ -479,6 +515,7 @@ impl Agent {
         .await?;
 
         state.latest_config = first_config.clone();
+        let initial_config_revision = Some((first_config.rev_epoch, first_config.rev_id));
 
         let network_type = if let Some(network) = opts.network {
             if network == "auto" || network.is_empty() {
@@ -707,7 +744,9 @@ impl Agent {
 
         let inner = Arc::new(AgentInner {
             state,
+            latest_config_revision: ArcSwap::new(Arc::new(initial_config_revision)),
             bucket: bucket_name,
+            vbuuids: crate::vbuuid_cache::VbUuidCache::default(),
             cfg_manager: cfg_manager.clone(),
             conn_mgr,
             bulk_conn_mgr,
@@ -758,6 +797,20 @@ impl Agent {
     // Note: toggling TLS on and off is not supported and will result in internal errors.
     pub async fn reconfigure(&self, opts: ReconfigureAgentOptions) {
         self.inner.reconfigure(opts).await
+    }
+
+    /// The revision of the cluster config this agent is working from.
+    ///
+    /// Anything derived from the vbucket map — vbucket UUIDs, say — can cache
+    /// against this, because a failover or a vbucket movement bumps it.
+    /// `(epoch, id)` and not the other way round: an epoch bump resets the id.
+    ///
+    /// `None` before the first config arrives, which a caller should read as
+    /// "nothing derived from a vbucket map is cacheable yet". In practice this
+    /// is always `Some`: `Agent::new` does not return before a first config is
+    /// fetched, so no caller ever holds an `Agent` that has not seen one.
+    pub fn config_revision(&self) -> Option<(i64, i64)> {
+        self.inner.config_revision()
     }
 
     fn start_config_watcher(
@@ -1050,5 +1103,16 @@ impl Drop for Agent {
             self.id,
             Arc::strong_count(&self.inner)
         );
+    }
+}
+
+#[cfg(test)]
+mod config_revision_tests {
+    #[test]
+    fn a_revision_orders_epoch_before_id() {
+        // The pair is (epoch, id) and not (id, epoch), because an epoch bump
+        // resets the id: comparing the wrong way round makes a fresh config
+        // after a failover look older than the one it replaced.
+        assert!((1i64, 5i64) < (2i64, 1i64));
     }
 }

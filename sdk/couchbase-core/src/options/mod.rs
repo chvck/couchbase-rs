@@ -30,4 +30,5 @@ pub mod rangescan;
 pub mod search;
 pub mod search_management;
 pub mod stats;
+pub mod vbucket_seqnos;
 pub mod waituntilready;

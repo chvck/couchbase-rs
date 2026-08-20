@@ -1614,6 +1614,75 @@ impl TraceAttributes for StatsActionResponse {
     }
 }
 
+/// One vbucket's high sequence number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VbSeqno {
+    pub vbucket: u16,
+    pub seqno: u64,
+}
+
+/// The binary alternative to a `stats vbucket-seqno` sweep: every active
+/// vbucket's high sequence number in one packet, ten bytes each, rather than
+/// eight text fields per vbucket a node holds -- replicas included.
+#[derive(Debug, Clone)]
+pub struct GetAllVbSeqnosResponse {
+    pub seqnos: Vec<VbSeqno>,
+    pub server_duration: Option<Duration>,
+}
+
+/// `(u16 vbucket, u64 seqno)`, both big-endian — `ep_engine.cc` writes them
+/// with `Vbid::hton()` and `htonll`.
+const VB_SEQNO_ENTRY_LEN: usize = 2 + 8;
+
+impl TryFromClientResponse for GetAllVbSeqnosResponse {
+    fn try_from(resp: ClientResponse) -> Result<Self, Error> {
+        let packet = resp.packet();
+
+        if packet.status != Status::Success {
+            return Err(OpsCore::decode_error(&packet));
+        }
+
+        let server_duration = match &packet.framing_extras {
+            Some(f) => decode_res_ext_frames(f)?,
+            None => None,
+        };
+
+        let body = packet.value.unwrap_or_default();
+
+        // **A trailing partial entry is a protocol error, not something to
+        // truncate.** A vector built from a body this layer misread would be
+        // short, and a short vector is not a smaller wait — it is no wait at
+        // all for the vbuckets it left out.
+        if !body.len().is_multiple_of(VB_SEQNO_ENTRY_LEN) {
+            return Err(Error::new_protocol_error(format!(
+                "get all vb seqnos returned a {} byte body, not a multiple of {VB_SEQNO_ENTRY_LEN}",
+                body.len()
+            )));
+        }
+
+        let mut seqnos = Vec::with_capacity(body.len() / VB_SEQNO_ENTRY_LEN);
+        for chunk in body.chunks_exact(VB_SEQNO_ENTRY_LEN) {
+            seqnos.push(VbSeqno {
+                vbucket: u16::from_be_bytes([chunk[0], chunk[1]]),
+                seqno: u64::from_be_bytes([
+                    chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7], chunk[8], chunk[9],
+                ]),
+            });
+        }
+
+        Ok(GetAllVbSeqnosResponse {
+            seqnos,
+            server_duration,
+        })
+    }
+}
+
+impl TraceAttributes for GetAllVbSeqnosResponse {
+    fn server_duration(&self) -> Option<Duration> {
+        self.server_duration
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PingResponse {}
 
@@ -1633,5 +1702,72 @@ impl TryFromClientResponse for PingResponse {
 impl TraceAttributes for PingResponse {
     fn server_duration(&self) -> Option<Duration> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memdx::magic::Magic;
+    use crate::memdx::opcode::OpCode;
+    use crate::memdx::packet::ResponsePacket;
+
+    fn client_response_with_value(status: Status, value: Vec<u8>) -> ClientResponse {
+        let mut packet = ResponsePacket::new(Magic::Res, OpCode::GetAllVBSeqnos, 0, status, 0);
+        packet.value = Some(Bytes::from(value));
+        ClientResponse::new(packet, None)
+    }
+
+    fn decode_seqnos(value: Vec<u8>) -> Result<GetAllVbSeqnosResponse, Error> {
+        // Fully qualified: `GetAllVbSeqnosResponse::try_from(..)` is ambiguous
+        // between this trait and the standard library's blanket `TryFrom`,
+        // which every type picks up reflexively.
+        <GetAllVbSeqnosResponse as TryFromClientResponse>::try_from(client_response_with_value(
+            Status::Success,
+            value,
+        ))
+    }
+
+    #[test]
+    fn a_body_decodes_big_endian_pairs() {
+        // (u16 vbucket, u64 seqno), both big-endian: ep_engine writes them with
+        // Vbid::hton() and htonll.
+        let mut body = Vec::new();
+        body.extend_from_slice(&7u16.to_be_bytes());
+        body.extend_from_slice(&42u64.to_be_bytes());
+        body.extend_from_slice(&9u16.to_be_bytes());
+        body.extend_from_slice(&1u64.to_be_bytes());
+
+        let resp = decode_seqnos(body).expect("a well-formed body decodes");
+        assert_eq!(
+            resp.seqnos,
+            vec![
+                VbSeqno {
+                    vbucket: 7,
+                    seqno: 42
+                },
+                VbSeqno {
+                    vbucket: 9,
+                    seqno: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_body_is_no_vbuckets_rather_than_an_error() {
+        let resp = decode_seqnos(Vec::new()).expect("an empty body is a valid answer");
+        assert!(resp.seqnos.is_empty());
+    }
+
+    #[test]
+    fn a_partial_entry_is_refused() {
+        // A vector built from a misread body would be short, and a short vector is
+        // not a smaller wait -- it is no wait at all for the vbuckets it left out.
+        let body = vec![0u8; 10 + 3];
+        assert!(
+            decode_seqnos(body).is_err(),
+            "a trailing partial entry must not be truncated away"
+        );
     }
 }

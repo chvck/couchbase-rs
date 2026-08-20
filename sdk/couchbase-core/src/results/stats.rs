@@ -55,3 +55,16 @@ pub struct StatsResult {
     /// How many entries were delivered to the callback.
     pub entries: usize,
 }
+
+/// What the KV service measures about one collection.
+///
+/// **Two numbers are all it publishes**, and everything a caller reports
+/// beyond them is derived from them, constant, or absent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CollectionStats {
+    /// Documents, summed across every node.
+    pub count: u64,
+    /// Bytes those documents occupy, summed across every node.
+    pub size: u64,
+}

@@ -35,17 +35,19 @@ use crate::memdx::ops_rangescan::{
 };
 use crate::memdx::ops_util::OpsUtil;
 use crate::memdx::request::{
-    AddRequest, AppendRequest, DecrementRequest, DeleteRequest, GetAndLockRequest,
-    GetAndTouchRequest, GetClusterConfigRequest, GetCollectionIdRequest, GetMetaRequest,
-    GetRequest, IncrementRequest, LookupInRequest, MutateInRequest, PingRequest, PrependRequest,
-    ReplaceRequest, SelectBucketRequest, SetRequest, StatsRequest, TouchRequest, UnlockRequest,
+    AddRequest, AppendRequest, DecrementRequest, DeleteRequest, GetAllVbSeqnosRequest,
+    GetAndLockRequest, GetAndTouchRequest, GetClusterConfigRequest, GetCollectionIdRequest,
+    GetMetaRequest, GetRequest, IncrementRequest, LookupInRequest, MutateInRequest, PingRequest,
+    PrependRequest, ReplaceRequest, SelectBucketRequest, SetRequest, StatsRequest, TouchRequest,
+    UnlockRequest,
 };
 use crate::memdx::response::{
     AddResponse, AppendResponse, BootstrapResult, DecrementResponse, DeleteResponse,
-    GetAndLockResponse, GetAndTouchResponse, GetClusterConfigResponse, GetCollectionIdResponse,
-    GetMetaResponse, GetResponse, IncrementResponse, LookupInResponse, MutateInResponse,
-    PingResponse, PrependResponse, ReplaceResponse, SelectBucketResponse, SetResponse,
-    StatsActionResponse, StatsResponse, TouchResponse, TraceAttributes, UnlockResponse,
+    GetAllVbSeqnosResponse, GetAndLockResponse, GetAndTouchResponse, GetClusterConfigResponse,
+    GetCollectionIdResponse, GetMetaResponse, GetResponse, IncrementResponse, LookupInResponse,
+    MutateInResponse, PingResponse, PrependResponse, ReplaceResponse, SelectBucketResponse,
+    SetResponse, StatsActionResponse, StatsResponse, TouchResponse, TraceAttributes,
+    UnlockResponse,
 };
 use crate::tracingcomponent::{BeginDispatchFields, EndDispatchFields, OperationId};
 use chrono::Utc;
@@ -141,6 +143,16 @@ pub(crate) trait KvClientOps: Sized + Send + Sync {
         &self,
         req: RangeScanCancelRequest,
     ) -> impl Future<Output = KvResult<RangeScanCancelResponse>> + Send;
+
+    /// Ask one node for every active vbucket's high seqno, in a single reply.
+    ///
+    /// Unlike `stats`, this is not a sweep: `GET_ALL_VB_SEQNOS` answers with one
+    /// packet holding every vbucket the node has, so there is no callback and no
+    /// loop to an empty terminator.
+    fn get_all_vb_seqnos(
+        &self,
+        req: GetAllVbSeqnosRequest<'_>,
+    ) -> impl Future<Output = KvResult<GetAllVbSeqnosResponse>> + Send;
 
     /// Send one `STAT` and read every entry it answers with.
     ///
@@ -511,6 +523,25 @@ where
                     self.ops_rangescan()
                         .range_scan_cancel(self.client(), req)
                         .await,
+                )
+                .await?;
+            let opaque = op.opaque();
+
+            let res = self.handle_response_side_result(op.recv().await).await?;
+            Ok((res, opaque))
+        })
+        .await
+    }
+
+    async fn get_all_vb_seqnos(
+        &self,
+        req: GetAllVbSeqnosRequest<'_>,
+    ) -> KvResult<GetAllVbSeqnosResponse> {
+        self.update_last_activity();
+        self.with_dispatch_span(req, |req| async move {
+            let mut op = self
+                .handle_dispatch_side_result(
+                    self.ops_util().get_all_vb_seqnos(self.client(), req).await,
                 )
                 .await?;
             let opaque = op.opaque();

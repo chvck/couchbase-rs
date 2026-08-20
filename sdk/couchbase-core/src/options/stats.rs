@@ -43,6 +43,32 @@ impl<'a> StatsOptions<'a> {
     }
 }
 
+/// Ask KV what it measures about one collection.
+///
+/// **The group is asked for one collection by name**, `collections
+/// <scope>.<collection>`, rather than for all of them and filtered here. It
+/// costs one small reply instead of one per collection in the bucket, and it
+/// is what makes absence *typed*: a name the bucket does not hold answers
+/// `CollectionUnknown` (0x88) or `ScopeUnknown` (0x8c) rather than simply
+/// never appearing in a listing.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct CollectionStatsOptions<'a> {
+    pub scope_name: &'a str,
+    pub collection_name: &'a str,
+    pub retry_strategy: Arc<dyn RetryStrategy>,
+}
+
+impl<'a> CollectionStatsOptions<'a> {
+    pub fn new(scope_name: &'a str, collection_name: &'a str) -> Self {
+        Self {
+            scope_name,
+            collection_name,
+            retry_strategy: DEFAULT_RETRY_STRATEGY.clone(),
+        }
+    }
+}
+
 /// Ask `STAT` of the node holding one vbucket.
 ///
 /// The vbucket picks the node; it is not sent to the server, because `STAT` is a

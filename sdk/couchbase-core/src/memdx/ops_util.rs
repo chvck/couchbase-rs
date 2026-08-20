@@ -25,8 +25,12 @@ use crate::memdx::magic::Magic;
 use crate::memdx::opcode::OpCode;
 use crate::memdx::packet::RequestPacket;
 use crate::memdx::pendingop::StandardPendingOp;
-use crate::memdx::request::{GetCollectionIdRequest, PingRequest, StatsRequest};
-use crate::memdx::response::{GetCollectionIdResponse, PingResponse, StatsResponse};
+use crate::memdx::request::{
+    GetAllVbSeqnosRequest, GetCollectionIdRequest, PingRequest, StatsRequest,
+};
+use crate::memdx::response::{
+    GetAllVbSeqnosResponse, GetCollectionIdResponse, PingResponse, StatsResponse,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpsUtil {
@@ -109,6 +113,49 @@ impl OpsUtil {
                     opaque: None,
                 },
                 true,
+                None,
+            )
+            .await?;
+
+        Ok(StandardPendingOp::new(op))
+    }
+
+    /// Dispatch `GET_ALL_VB_SEQNOS`, the binary alternative to a `stats
+    /// vbucket-seqno` sweep: ten bytes per vbucket rather than eight text
+    /// fields per vbucket a node holds -- replicas included.
+    pub async fn get_all_vb_seqnos<D>(
+        &self,
+        dispatcher: &D,
+        request: GetAllVbSeqnosRequest<'_>,
+    ) -> Result<StandardPendingOp<GetAllVbSeqnosResponse>>
+    where
+        D: Dispatcher,
+    {
+        let mut ext_frame_buf = [0; 128];
+        let (magic, used) = self.encode_req_ext_frames(request.on_behalf_of, &mut ext_frame_buf)?;
+        let framing_extras = if used > 0 {
+            Some(&ext_frame_buf[..used])
+        } else {
+            None
+        };
+
+        let extras = request.extras();
+
+        let op = dispatcher
+            .dispatch(
+                RequestPacket {
+                    magic,
+                    op_code: OpCode::GetAllVBSeqnos,
+                    datatype: 0,
+                    vbucket_id: None,
+                    cas: None,
+                    extras: Some(&extras),
+                    key: None,
+                    value: None,
+                    framing_extras,
+                    opaque: None,
+                },
+                false,
                 None,
             )
             .await?;

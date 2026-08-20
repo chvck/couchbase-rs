@@ -81,6 +81,7 @@ pub mod tracingcomponent;
 mod util;
 mod vbucketmap;
 mod vbucketrouter;
+mod vbuuid_cache;
 
 #[cfg(feature = "rustls-tls")]
 pub mod insecure_certverfier;

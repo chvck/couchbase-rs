@@ -32,6 +32,7 @@ pub enum OpCode {
     Decrement,
     Noop,
     Stat,
+    GetAllVBSeqnos,
     Touch,
     GAT,
     Append,
@@ -80,6 +81,7 @@ impl From<OpCode> for u8 {
             OpCode::Decrement => 0x06,
             OpCode::Noop => 0x0a,
             OpCode::Stat => 0x10,
+            OpCode::GetAllVBSeqnos => 0x48,
             OpCode::Append => 0x0e,
             OpCode::Prepend => 0x0f,
             OpCode::Touch => 0x1c,
@@ -132,6 +134,7 @@ impl TryFrom<u8> for OpCode {
             0x06 => OpCode::Decrement,
             0x0a => OpCode::Noop,
             0x10 => OpCode::Stat,
+            0x48 => OpCode::GetAllVBSeqnos,
             0x0e => OpCode::Append,
             0x0f => OpCode::Prepend,
             0x1c => OpCode::Touch,
@@ -184,6 +187,7 @@ impl Display for OpCode {
             OpCode::Decrement => "Decrement",
             OpCode::Noop => "Noop",
             OpCode::Stat => "Stat",
+            OpCode::GetAllVBSeqnos => "Get all VB seqnos",
             OpCode::Append => "Append",
             OpCode::Prepend => "Prepend",
             OpCode::Touch => "Touch",
@@ -242,6 +246,7 @@ mod tests {
         OpCode::Decrement,
         OpCode::Noop,
         OpCode::Stat,
+        OpCode::GetAllVBSeqnos,
         OpCode::Touch,
         OpCode::GAT,
         OpCode::Append,
@@ -293,6 +298,7 @@ mod tests {
                 | OpCode::Decrement
                 | OpCode::Noop
                 | OpCode::Stat
+                | OpCode::GetAllVBSeqnos
                 | OpCode::Touch
                 | OpCode::GAT
                 | OpCode::Append

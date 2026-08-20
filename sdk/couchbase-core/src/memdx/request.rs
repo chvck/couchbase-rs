@@ -880,6 +880,55 @@ impl<'a> StatsRequest<'a> {
     }
 }
 
+/// Which vbucket states to report.
+///
+/// **`Active` rather than `Alive`, and it matters twice.** A replica reports
+/// its checkpoint snapshot *range end*, which can name a sequence number the
+/// vbucket has not received — ask an index to wait for one of those and the
+/// scan never finishes. Filtering here also means the caller does not have to
+/// work out which node is active for which vbucket, which is 1024 routing
+/// lookups it would otherwise do per sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RequestedVbState {
+    /// Every state that is not dead.
+    Alive = 0,
+    Active = 1,
+    Replica = 2,
+    Pending = 3,
+}
+
+/// The binary alternative to a `stats vbucket-seqno` sweep: every active
+/// vbucket's high sequence number in one packet, ten bytes each, rather than
+/// eight text fields per vbucket a node holds -- replicas included.
+#[derive(Debug, Clone)]
+pub struct GetAllVbSeqnosRequest<'a> {
+    pub state: RequestedVbState,
+    /// Report each vbucket's high seqno **for this collection only**.
+    ///
+    /// `None` is the bucket-wide high seqno. The indexer's own
+    /// `SessionConsistency` scopes to the collection being scanned, so a
+    /// bucket-wide vector makes one collection's reads wait for another's
+    /// writes to be indexed -- safe, since waiting for more is always safe,
+    /// but a coupling worth removing once a caller keeps a vector per
+    /// collection.
+    pub collection_id: Option<u32>,
+    pub on_behalf_of: Option<&'a str>,
+}
+
+impl GetAllVbSeqnosRequest<'_> {
+    /// 4 bytes of state, then optionally 4 of collection id. The server's
+    /// validator accepts 0, 4 or 8 and refuses anything else.
+    pub(crate) fn extras(&self) -> Vec<u8> {
+        let mut extras = Vec::with_capacity(8);
+        extras.extend_from_slice(&(self.state as u32).to_be_bytes());
+        if let Some(cid) = self.collection_id {
+            extras.extend_from_slice(&cid.to_be_bytes());
+        }
+        extras
+    }
+}
+
 #[derive(Default, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PingRequest<'a> {
     pub(crate) on_behalf_of: Option<&'a str>,
@@ -893,5 +942,31 @@ impl<'a> PingRequest<'a> {
     pub fn on_behalf_of(mut self, on_behalf_of: &'a str) -> Self {
         self.on_behalf_of = Some(on_behalf_of);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_state_filter_is_the_first_four_bytes() {
+        let req = GetAllVbSeqnosRequest {
+            state: RequestedVbState::Active,
+            collection_id: None,
+            on_behalf_of: None,
+        };
+        assert_eq!(req.extras(), vec![0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn a_collection_id_appends_four_more() {
+        // The validator accepts 0, 4 or 8 extras bytes and refuses anything else.
+        let req = GetAllVbSeqnosRequest {
+            state: RequestedVbState::Active,
+            collection_id: Some(0x0a0b0c0d),
+            on_behalf_of: None,
+        };
+        assert_eq!(req.extras(), vec![0, 0, 0, 1, 0x0a, 0x0b, 0x0c, 0x0d]);
     }
 }

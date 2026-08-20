@@ -20,6 +20,7 @@ use crate::cbconfig::{CollectionManifest, FullBucketConfig, FullClusterConfig};
 use crate::clusterlabels::ClusterLabels;
 use crate::error::Result;
 use crate::features::BucketFeature;
+use crate::memdx::response::VbSeqno;
 use crate::mgmtx::bucket_settings::BucketDef;
 use crate::mgmtx::metakv2::MetaKv2Entry;
 use crate::mgmtx::mgmt::AutoFailoverSettings;
@@ -65,7 +66,8 @@ use crate::options::search_management::{
     FreezePlanOptions, GetIndexOptions, GetIndexedDocumentsCountOptions, PauseIngestOptions,
     ResumeIngestOptions, UnfreezePlanOptions, UpsertIndexOptions,
 };
-use crate::options::stats::{StatsByVbucketOptions, StatsOptions};
+use crate::options::stats::{CollectionStatsOptions, StatsByVbucketOptions, StatsOptions};
+use crate::options::vbucket_seqnos::VbucketSeqnosOptions;
 use crate::options::waituntilready::WaitUntilReadyOptions;
 use crate::queryx::index::Index;
 use crate::results::analytics::AnalyticsResultStream;
@@ -80,11 +82,12 @@ use crate::results::pingreport::PingReport;
 use crate::results::query::QueryResultStream;
 use crate::results::rangescan::RangeScanCreateResult;
 use crate::results::search::SearchResultStream;
-use crate::results::stats::{StatsEntry, StatsResult};
+use crate::results::stats::{CollectionStats, StatsEntry, StatsResult};
 use crate::searchx;
 use crate::searchx::document_analysis::DocumentAnalysis;
 use serde_json::value::RawValue;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[cfg(feature = "top-level-spans")]
 use {
@@ -491,6 +494,30 @@ impl Agent {
         F: FnMut(StatsEntry) + Send,
     {
         self.inner.crud.stats_by_vbucket(opts, data_cb).await
+    }
+
+    /// Ask KV what it measures about one collection.
+    ///
+    /// `Ok(None)` means the scope or collection does not exist -- distinct
+    /// from `Ok(Some(CollectionStats { count: 0, .. }))`, an existing
+    /// collection with nothing in it.
+    pub async fn collection_stats(
+        &self,
+        opts: CollectionStatsOptions<'_>,
+    ) -> Result<Option<CollectionStats>> {
+        self.inner.crud.collection_stats(opts).await
+    }
+
+    /// Fan out `GET_ALL_VB_SEQNOS` across every KV node and concatenate the
+    /// answers: every active vbucket's current high sequence number.
+    ///
+    /// **On the point-operation manager, not the bulk one** — the opposite of
+    /// `stats` above, and for the same reason stated the opposite way: a single
+    /// packet answers, so nothing here holds its connection. This sits on the
+    /// critical path of every `at_plus` scan, where `stats` does not, which is
+    /// also why the nodes are asked together rather than in turn.
+    pub async fn vbucket_seqnos_active(&self, opts: VbucketSeqnosOptions) -> Result<Vec<VbSeqno>> {
+        self.inner.crud.vbucket_seqnos_active(opts).await
     }
 
     pub async fn get_collection_id(
@@ -1581,5 +1608,372 @@ impl Agent {
                 .await;
         }
         self.inner.mgmt.sync_metakv2_quorum(opts).await
+    }
+
+    /// Every active vbucket's UUID, **cached** — the call a scan vector should
+    /// make.
+    ///
+    /// One map per agent, shared by every consumer that builds a vector, so the
+    /// consumer that can detect staleness refreshes the map the one that cannot
+    /// is about to use. [`Agent::invalidate_vbuuids`] is how a refusal gets back
+    /// here; `crate::vbuuid_cache` documents what else drops it.
+    ///
+    /// [`Agent::vbucket_vbuuids`] is the uncached read underneath, kept public
+    /// because a benchmark measuring the cost of the read itself has to be able
+    /// to reach past the thing that avoids it.
+    ///
+    /// **Reads the revision before fetching, and stores under that reading** —
+    /// not one taken afterward. `config_revision` is published only once the
+    /// components it describes have finished reconfiguring, so a revision read
+    /// after the fetch could already describe a *newer* topology than the map
+    /// just built from the old one, and the map would be cached under a key
+    /// that will never see it invalidated by a config change that already
+    /// happened.
+    pub async fn vbuuid_map(&self) -> Result<Arc<HashMap<u16, u64>>> {
+        let revision = self.config_revision();
+        if let Some(map) = self.inner.vbuuids.peek(revision) {
+            return Ok(map);
+        }
+        let fresh = Arc::new(self.vbucket_vbuuids().await?);
+        self.inner.vbuuids.store(revision, Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// Report that `stale` was refused by the server, so the next
+    /// [`Agent::vbuuid_map`] reads afresh.
+    ///
+    /// **The map that was refused, not "the map"** — several scans share one
+    /// and each will report it, so a report has to be able to be a no-op. See
+    /// `crate::vbuuid_cache::VbUuidCache::invalidate`.
+    pub fn invalidate_vbuuids(&self, stale: &Arc<HashMap<u16, u64>>) {
+        self.inner.vbuuids.invalidate(stale);
+    }
+
+    /// The uncached read underneath [`Agent::vbuuid_map`], kept public because a
+    /// benchmark measuring the cost of the read itself has to be able to reach
+    /// past the thing that avoids it.
+    ///
+    /// **All vbuckets or an error, never a partial map.** A scan vector
+    /// missing a vbucket's uuid is not a smaller answer -- it is no answer at
+    /// all for that vbucket, and a caller reading `Ok` has no way to tell a
+    /// complete map from one a rebalance thinned out from under it. So the
+    /// completeness check at the end treats anything short of every vbucket
+    /// the same as none, and fails loudly enough that a caller can retry
+    /// rather than build a scan vector with silent holes in it.
+    pub async fn vbucket_vbuuids(&self) -> Result<HashMap<u16, u64>> {
+        let n = self.num_vbuckets().await?;
+        if n == 0 {
+            return Err(crate::error::Error::new_message_error(
+                "no vbucket map yet, so no scan vector can be built",
+            ));
+        }
+
+        // Pure and in-memory -- the router is an `ArcSwap` read -- so a
+        // vbucket with no active node right now (mid-failover) is simply
+        // absent here rather than treated as a hard failure. The
+        // completeness check below is what turns that absence into an
+        // error; this loop does not need to.
+        let mut endpoint_id_by_vb: HashMap<u16, Arc<str>> = HashMap::with_capacity(n);
+        for vb in 0..n as u16 {
+            if let Ok(id) = self.inner.crud.dispatch_to_vbucket(vb) {
+                endpoint_id_by_vb.insert(vb, id);
+            }
+        }
+
+        // Resolve each *distinct* endpoint id once, not once per vbucket: `n`
+        // vbuckets share a handful of nodes. Unlike the loop above, a
+        // resolution failure here is propagated rather than swallowed -- an
+        // id the router just returned but the connection manager cannot
+        // resolve means the two disagree about the topology, which is not
+        // the same kind of "try again later" as a vbucket briefly having no
+        // owner, and must not be allowed to quietly shrink the map.
+        let mut canonical_by_id: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+        for id in endpoint_id_by_vb.values() {
+            if canonical_by_id.contains_key(id) {
+                continue;
+            }
+            let addr = self.inner.crud.resolve_canonical_addr(id).await?;
+            canonical_by_id.insert(id.clone(), addr);
+        }
+
+        let mut active: HashMap<u16, String> = HashMap::with_capacity(n);
+        for (vb, id) in &endpoint_id_by_vb {
+            if let Some(addr) = canonical_by_id.get(id) {
+                active.insert(*vb, addr.to_string());
+            }
+        }
+
+        let mut vbuuids: HashMap<u16, u64> = HashMap::with_capacity(n);
+        let mut bad: Option<String> = None;
+        self.stats(StatsOptions::new("vbucket-seqno"), |entry| {
+            let key = entry.key_str();
+            let value = entry.value_str();
+            if !take_vbuuid_line(&mut vbuuids, &active, &entry.endpoint, &key, &value)
+                && bad.is_none()
+            {
+                bad = Some(format!("{key} = {value:?}"));
+            }
+        })
+        .await?;
+
+        if let Some(bad) = bad {
+            return Err(crate::error::Error::new_message_error(format!(
+                "could not parse vbucket-seqno {bad}"
+            )));
+        }
+        require_complete(n, vbuuids)
+    }
+}
+
+/// `Ok(vbuuids)` only if it has exactly one entry per vbucket in `0..n`;
+/// otherwise an error naming the shortfall and, cheaply, which vbuckets are
+/// missing.
+///
+/// **Strict equality, not merely non-empty.** A gap during a rebalance is not
+/// a smaller scan vector, it is a hole a caller cannot see -- so anything
+/// short of every vbucket is refused the same way an empty map is, and the
+/// caller finds out from the error rather than from a scan that silently
+/// skips vbuckets.
+fn require_complete(n: usize, vbuuids: HashMap<u16, u64>) -> Result<HashMap<u16, u64>> {
+    if vbuuids.len() == n {
+        return Ok(vbuuids);
+    }
+    Err(crate::error::Error::new_message_error(format!(
+        "got {} of {n} vbucket uuids; missing {}",
+        vbuuids.len(),
+        missing_vbuckets(n as u16, &vbuuids)
+    )))
+}
+
+/// The vbuckets in `0..n` absent from `have`, as a short, readable list for
+/// an error message -- capped rather than exhaustive, because the list
+/// exists to make a small gap actionable at a glance, not to enumerate a
+/// four-figure outage a reader would skim past anyway.
+fn missing_vbuckets(n: u16, have: &HashMap<u16, u64>) -> String {
+    const MAX_NAMED: usize = 20;
+    let mut missing: Vec<u16> = (0..n).filter(|vb| !have.contains_key(vb)).collect();
+    missing.sort_unstable();
+
+    if missing.len() > MAX_NAMED {
+        let shown = missing[..MAX_NAMED]
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{shown}, and {} more", missing.len() - MAX_NAMED)
+    } else {
+        missing
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Take one `vb_N:uuid` line if it came from the node active for that
+/// vbucket. Returns `false` only for a `uuid` line whose value will not parse
+/// — every other shape is skipped rather than refused, because the group
+/// gains fields between server versions.
+fn take_vbuuid_line(
+    out: &mut HashMap<u16, u64>,
+    active: &HashMap<u16, String>,
+    endpoint: &str,
+    key: &str,
+    value: &str,
+) -> bool {
+    let Some(rest) = key.strip_prefix("vb_") else {
+        return true;
+    };
+    let Some((vb, field)) = rest.split_once(':') else {
+        return true;
+    };
+    if field != "uuid" {
+        return true;
+    }
+    let Ok(vb) = vb.parse::<u16>() else {
+        return true;
+    };
+    if active.get(&vb).map(String::as_str) != Some(endpoint) {
+        return true;
+    }
+    match value.parse::<u64>() {
+        Ok(v) => {
+            out.insert(vb, v);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_active_node_s_uuid_line_is_taken() {
+        // A replica normally shares the active's failover-log lineage, so taking
+        // whichever answered would *usually* agree. "Usually" is not a property to
+        // build a consistency guarantee on.
+        let mut out = std::collections::HashMap::new();
+        let active: std::collections::HashMap<u16, String> =
+            [(7u16, "10.0.0.1:11210".to_string())].into_iter().collect();
+
+        take_vbuuid_line(&mut out, &active, "10.0.0.1:11210", "vb_7:uuid", "12345");
+        take_vbuuid_line(&mut out, &active, "10.0.0.2:11210", "vb_7:uuid", "99999");
+        take_vbuuid_line(&mut out, &active, "10.0.0.1:11210", "vb_7:high_seqno", "4");
+
+        assert_eq!(
+            out.get(&7),
+            Some(&12345u64),
+            "the replica's uuid and the non-uuid field are both skipped"
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn a_key_without_the_vb_prefix_is_skipped() {
+        let mut out = HashMap::new();
+        let active = HashMap::new();
+        assert!(take_vbuuid_line(
+            &mut out,
+            &active,
+            "10.0.0.1:11210",
+            "curr_connections",
+            "5"
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_vb_key_without_a_colon_is_skipped() {
+        let mut out = HashMap::new();
+        let active = HashMap::new();
+        assert!(take_vbuuid_line(
+            &mut out,
+            &active,
+            "10.0.0.1:11210",
+            "vb_7",
+            "12345"
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_field_other_than_uuid_is_skipped() {
+        let mut out = HashMap::new();
+        let active: HashMap<u16, String> =
+            [(7u16, "10.0.0.1:11210".to_string())].into_iter().collect();
+        assert!(take_vbuuid_line(
+            &mut out,
+            &active,
+            "10.0.0.1:11210",
+            "vb_7:high_seqno",
+            "4"
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_unparsable_vbucket_number_is_skipped() {
+        let mut out = HashMap::new();
+        let active = HashMap::new();
+        assert!(take_vbuuid_line(
+            &mut out,
+            &active,
+            "10.0.0.1:11210",
+            "vb_not-a-number:uuid",
+            "12345"
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_line_from_a_node_not_active_for_that_vbucket_is_skipped() {
+        let mut out = HashMap::new();
+        let active: HashMap<u16, String> =
+            [(7u16, "10.0.0.1:11210".to_string())].into_iter().collect();
+        assert!(take_vbuuid_line(
+            &mut out,
+            &active,
+            "10.0.0.2:11210",
+            "vb_7:uuid",
+            "12345"
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_unparsable_uuid_value_is_refused_not_skipped() {
+        // The one shape that returns `false`: a `uuid` line, from the right
+        // node, whose value will not parse. Everything else above is a silent
+        // skip; this is the one case `vbucket_vbuuids` turns into an error.
+        let mut out = HashMap::new();
+        let active: HashMap<u16, String> =
+            [(7u16, "10.0.0.1:11210".to_string())].into_iter().collect();
+        assert!(!take_vbuuid_line(
+            &mut out,
+            &active,
+            "10.0.0.1:11210",
+            "vb_7:uuid",
+            "not-a-number"
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_complete_map_passes_through_unchanged() {
+        let vbuuids: HashMap<u16, u64> = [(0u16, 1u64), (1, 2), (2, 3)].into_iter().collect();
+        let out = require_complete(3, vbuuids.clone()).expect("complete map is accepted");
+        assert_eq!(out, vbuuids);
+    }
+
+    #[test]
+    fn an_empty_map_is_refused_not_returned_as_ok() {
+        // The original bug wore exactly this shape: every line skipped, no
+        // parse error, `Ok(HashMap::new())`. This is the check that turns it
+        // into a loud failure instead of a map that looks merely quiet.
+        let err = require_complete(3, HashMap::new()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("got 0 of 3"), "{msg}");
+        assert!(msg.contains("0, 1, 2"), "{msg}");
+    }
+
+    #[test]
+    fn a_partial_map_is_refused_not_returned_as_ok() {
+        // A rebalance leaving one vbucket briefly unowned must not look like
+        // success with a smaller vector -- it is a hole the caller cannot see
+        // in an `Ok`.
+        let vbuuids: HashMap<u16, u64> = [(0u16, 1u64), (2, 3)].into_iter().collect();
+        let err = require_complete(3, vbuuids).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("got 2 of 3"), "{msg}");
+        assert!(
+            msg.contains('1'),
+            "the one missing vbucket should be named: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_vbuckets_lists_the_gaps_in_order() {
+        let have: HashMap<u16, u64> = [(0u16, 1u64), (2, 3), (4, 5)].into_iter().collect();
+        assert_eq!(missing_vbuckets(5, &have), "1, 3");
+    }
+
+    #[test]
+    fn missing_vbuckets_is_empty_when_nothing_is_missing() {
+        let have: HashMap<u16, u64> = [(0u16, 1u64), (1, 2)].into_iter().collect();
+        assert_eq!(missing_vbuckets(2, &have), "");
+    }
+
+    #[test]
+    fn missing_vbuckets_caps_a_long_list_rather_than_enumerate_it() {
+        let have: HashMap<u16, u64> = HashMap::new();
+        let msg = missing_vbuckets(25, &have);
+        assert!(msg.ends_with("and 5 more"), "{msg}");
+        assert_eq!(
+            msg.matches(", ").count(),
+            20,
+            "20 named vbuckets, comma-separated: {msg}"
+        );
     }
 }
