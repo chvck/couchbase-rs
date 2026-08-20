@@ -210,24 +210,26 @@ impl TlsConnection {
 
         let tls_connector = tokio_native_tls::TlsConnector::from(tls_config);
 
-        let remote_addr = addr.to_string();
-        let stream = timeout_at(
-            opts.deadline,
-            tls_connector.connect(&remote_addr, tcp_socket),
-        )
-        .await
-        .map_err(|e| {
-            Error::new_connection_failed_error(
-                "failed to upgrade tcp stream to tls within timeout",
-                Box::new(io::Error::new(io::ErrorKind::TimedOut, e)),
-            )
-        })?
-        .map_err(|e| {
-            Error::new_connection_failed_error(
-                "failed to upgrade tcp stream to tls",
-                Box::new(io::Error::other(e)),
-            )
-        })?;
+        // The host alone, without the port. `native_tls`'s second argument is a
+        // domain name — it becomes the SNI and the name the certificate is
+        // checked against — and `Address::to_string` appends `:port`, which is
+        // neither. A server that validates SNI rejects the handshake outright,
+        // and hostname verification can never match. The `rustls` arm above
+        // already uses `addr.host`; this is the same decision.
+        let stream = timeout_at(opts.deadline, tls_connector.connect(&addr.host, tcp_socket))
+            .await
+            .map_err(|e| {
+                Error::new_connection_failed_error(
+                    "failed to upgrade tcp stream to tls within timeout",
+                    Box::new(io::Error::new(io::ErrorKind::TimedOut, e)),
+                )
+            })?
+            .map_err(|e| {
+                Error::new_connection_failed_error(
+                    "failed to upgrade tcp stream to tls",
+                    Box::new(io::Error::other(e)),
+                )
+            })?;
 
         Ok(TlsConnection {
             stream,
