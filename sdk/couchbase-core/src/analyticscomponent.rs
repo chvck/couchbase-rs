@@ -26,7 +26,7 @@ use crate::httpx::client::Client;
 use crate::httpx::request::Auth;
 use crate::options::analytics::{AnalyticsOptions, GetPendingMutationsOptions};
 use crate::results::analytics::AnalyticsResultStream;
-use crate::retry::{orchestrate_retries, RetryManager, RetryRequest};
+use crate::retry::{orchestrate_retries, RetryComponent, RetryRequest};
 use crate::service_type::ServiceType;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub(crate) struct AnalyticsComponent<C: Client> {
     id: String,
     http_component: HttpComponent<C>,
 
-    retry_manager: Arc<RetryManager>,
+    retry_manager: Arc<RetryComponent>,
 }
 
 pub(crate) struct AnalyticsComponentConfig {
@@ -51,7 +51,7 @@ pub(crate) struct AnalyticsComponentOptions {
 
 impl<C: Client + 'static> AnalyticsComponent<C> {
     pub fn new(
-        retry_manager: Arc<RetryManager>,
+        retry_manager: Arc<RetryComponent>,
         http_client: Arc<C>,
         config: AnalyticsComponentConfig,
         opts: AnalyticsComponentOptions,

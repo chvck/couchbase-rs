@@ -32,7 +32,7 @@ use crate::options::waituntilready::{ClusterState, WaitUntilReadyOptions};
 use crate::querycomponent::QueryComponent;
 use crate::results::diagnostics::{DiagnosticsResult, EndpointDiagnostics};
 use crate::results::pingreport::{EndpointPingReport, PingReport, PingState};
-use crate::retry::{RetryManager, RetryReason, RetryRequest};
+use crate::retry::{RetryComponent, RetryReason, RetryRequest};
 use crate::retrybesteffort::{BestEffortRetryStrategy, ExponentialBackoffCalculator};
 use crate::searchcomponent::SearchComponent;
 use crate::service_type::ServiceType;
@@ -87,7 +87,7 @@ pub struct DiagnosticsComponent<C: Client, M: KvEndpointClientManager> {
 
     state: Mutex<DiagnosticsComponentState>,
 
-    retry_manager: Arc<RetryManager>,
+    retry_manager: Arc<RetryComponent>,
 }
 
 #[derive(Debug)]
@@ -108,7 +108,7 @@ impl<C: Client + 'static, M: KvEndpointClientManager> DiagnosticsComponent<C, M>
         kv_client_manager: Arc<M>,
         query_component: Arc<QueryComponent<C>>,
         search_component: Arc<SearchComponent<C>>,
-        retry_manager: Arc<RetryManager>,
+        retry_manager: Arc<RetryComponent>,
         config: DiagnosticsComponentConfig,
     ) -> Self {
         let state = Mutex::new(DiagnosticsComponentState {
@@ -280,14 +280,11 @@ impl<C: Client + 'static, M: KvEndpointClientManager> DiagnosticsComponent<C, M>
                 return Ok(());
             }
 
-            let duration = self
-                .retry_manager
-                .maybe_retry(
-                    opts.retry_strategy.clone(),
-                    &mut retry_info,
-                    RetryReason::NotReady,
-                )
-                .await;
+            let duration = self.retry_manager.maybe_retry(
+                &opts.retry_strategy,
+                &mut retry_info,
+                RetryReason::NotReady,
+            );
 
             if let Some(duration) = duration {
                 debug!(

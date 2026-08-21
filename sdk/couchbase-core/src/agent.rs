@@ -54,7 +54,7 @@ use crate::nmvbhandler::{ConfigUpdater, StdNotMyVbucketConfigHandler};
 use crate::options::agent::{AgentOptions, ReconfigureAgentOptions};
 use crate::parsedconfig::{ParsedConfig, ParsedConfigBucketFeature, ParsedConfigFeature};
 use crate::querycomponent::{QueryComponent, QueryComponentConfig, QueryComponentOptions};
-use crate::retry::RetryManager;
+use crate::retry::{RetryComponent, DEFAULT_RETRY_MANAGER};
 use crate::searchcomponent::{SearchComponent, SearchComponentConfig, SearchComponentOptions};
 use crate::service_type::ServiceType;
 use crate::tls_config::TlsConfig;
@@ -184,7 +184,7 @@ pub(crate) struct AgentInner {
 
     vb_router: Arc<StdVbucketRouter>,
     collections: Arc<AgentCollectionResolver>,
-    retry_manager: Arc<RetryManager>,
+    retry_manager: Arc<RetryComponent>,
     http_client: Arc<ReqwestClient>,
     err_map_component: Arc<ErrMapComponent>,
 
@@ -703,7 +703,13 @@ impl Agent {
             },
         ));
 
-        let retry_manager = Arc::new(RetryManager::new(err_map_component.clone()));
+        // The manager is the embedder's to replace; the error map is not.
+        let retry_manager = Arc::new(RetryComponent::new(
+            err_map_component.clone(),
+            opts.retry_manager
+                .clone()
+                .unwrap_or_else(|| DEFAULT_RETRY_MANAGER.clone()),
+        ));
         let compression_manager = Arc::new(CompressionManager::new(opts.compression_config));
 
         let crud = CrudComponent::new(

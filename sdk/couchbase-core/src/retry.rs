@@ -36,6 +36,9 @@ use tracing::{debug, info};
 pub(crate) static DEFAULT_RETRY_STRATEGY: LazyLock<Arc<dyn RetryStrategy>> =
     LazyLock::new(|| Arc::new(FailFastRetryStrategy::default()));
 
+pub(crate) static DEFAULT_RETRY_MANAGER: LazyLock<Arc<dyn RetryManager>> =
+    LazyLock::new(|| Arc::new(DefaultRetryManager::default()));
+
 /// The reason an operation is being retried.
 ///
 /// Each variant identifies a specific transient failure condition that triggered
@@ -220,7 +223,11 @@ pub struct RetryRequest {
 }
 
 impl RetryRequest {
-    pub(crate) fn new(operation: &'static str, is_idempotent: bool) -> Self {
+    /// **Public because [`RetryManager`] is.** A trait an embedder can implement
+    /// but whose argument it cannot construct is only half published: there is no
+    /// way to unit-test the implementation without a live cluster and a provoked
+    /// failure. `operation` is the name that appears in retry logs.
+    pub fn new(operation: &'static str, is_idempotent: bool) -> Self {
         Self {
             operation,
             is_idempotent,
@@ -230,7 +237,13 @@ impl RetryRequest {
         }
     }
 
-    pub(crate) fn add_retry_attempt(&mut self, reason: RetryReason) {
+    /// Record that this request is being retried, and why.
+    ///
+    /// Public for the same reason as [`Self::new`]: an implementation of
+    /// [`RetryManager`] that retries must call this, or the attempt count and the
+    /// reasons seen are not attached to the error when the operation finally
+    /// fails, and a caller loses the only account of what the client did.
+    pub fn add_retry_attempt(&mut self, reason: RetryReason) {
         self.retry_attempts += 1;
         tracing::Span::current().record(SPAN_ATTRIB_RETRIES, self.retry_attempts);
         self.retry_reasons.insert(reason);
@@ -267,18 +280,53 @@ impl Display for RetryRequest {
     }
 }
 
-pub struct RetryManager {
-    err_map_component: Arc<ErrMapComponent>,
+/// Decides whether a failed operation is retried, and after how long.
+///
+/// **This is the layer above [`RetryStrategy`], and the distinction is the reason
+/// it is pluggable.** A strategy answers "given a reason, retry?" and is consulted
+/// per request. A manager owns the policy *around* that question — including which
+/// reasons are decided without asking the strategy at all, which
+/// [`DefaultRetryManager`] uses for the conditions a client must handle to remain
+/// correct.
+///
+/// **Replace it when the embedder already owns the recovery.** A gateway that
+/// provisions a missing keyspace and reissues the write itself does not want the
+/// client retrying `KvCollectionOutdated` underneath it: the retry cannot succeed
+/// until the keyspace exists, and only the embedder can create it. Supply an
+/// implementation through
+/// [`AgentOptions::retry_manager`](crate::options::agent::AgentOptions::retry_manager).
+///
+/// Implementations must be cheap to call and must not block: this runs on the
+/// operation's own task between attempts.
+pub trait RetryManager: Debug + Send + Sync {
+    /// `Some(duration)` to retry after waiting, `None` to fail the operation.
+    ///
+    /// `request` is the in-flight request's metadata; an implementation that
+    /// retries must call [`RetryRequest::add_retry_attempt`] so the attempt count
+    /// and the reasons seen are attached to the error if it eventually fails.
+    fn maybe_retry(
+        &self,
+        strategy: &Arc<dyn RetryStrategy>,
+        request: &mut RetryRequest,
+        reason: RetryReason,
+    ) -> Option<Duration>;
 }
 
-impl RetryManager {
-    pub fn new(err_map_component: Arc<ErrMapComponent>) -> Self {
-        Self { err_map_component }
-    }
+/// The manager the SDK uses unless an embedder supplies another.
+///
+/// Consults the request's [`RetryStrategy`], except for the reasons
+/// [`RetryReason::always_retry`] names — a stale vbucket map, a vbucket that has
+/// moved, a stale collection id — which are retried on a controlled backoff
+/// without asking. Those describe a client whose own routing state is behind the
+/// cluster's, and a client that gave up on them would report a failure the caller
+/// can do nothing about.
+#[derive(Debug, Default)]
+pub struct DefaultRetryManager {}
 
-    pub async fn maybe_retry(
+impl RetryManager for DefaultRetryManager {
+    fn maybe_retry(
         &self,
-        strategy: Arc<dyn RetryStrategy>,
+        strategy: &Arc<dyn RetryStrategy>,
         request: &mut RetryRequest,
         reason: RetryReason,
     ) -> Option<Duration> {
@@ -301,8 +349,43 @@ impl RetryManager {
     }
 }
 
+/// What the service components carry: the error map that classifies a failure
+/// into a [`RetryReason`], and the manager that decides what to do about one.
+///
+/// **Two fields rather than one object, because they are two concerns.** The
+/// error map answers "does the server call this status retryable" — a property of
+/// the wire, and the same answer for every embedder. The manager answers "so do
+/// we retry" — a policy, and the embedder's to replace. They travel together only
+/// because the retry loop needs both.
+#[derive(Debug)]
+pub(crate) struct RetryComponent {
+    err_map: Arc<ErrMapComponent>,
+    manager: Arc<dyn RetryManager>,
+}
+
+impl RetryComponent {
+    pub(crate) fn new(err_map: Arc<ErrMapComponent>, manager: Arc<dyn RetryManager>) -> Self {
+        Self { err_map, manager }
+    }
+
+    /// The classifier, for the one caller that runs its own retry loop.
+    pub(crate) fn err_map(&self) -> &ErrMapComponent {
+        &self.err_map
+    }
+
+    /// The decision, for the same caller.
+    pub(crate) fn maybe_retry(
+        &self,
+        strategy: &Arc<dyn RetryStrategy>,
+        request: &mut RetryRequest,
+        reason: RetryReason,
+    ) -> Option<Duration> {
+        self.manager.maybe_retry(strategy, request, reason)
+    }
+}
+
 pub(crate) async fn orchestrate_retries<Fut, Resp>(
-    rs: Arc<RetryManager>,
+    rs: Arc<RetryComponent>,
     strategy: Arc<dyn RetryStrategy>,
     mut retry_info: RetryRequest,
     operation: impl Fn() -> Fut + Send + Sync,
@@ -319,11 +402,8 @@ where
             Err(e) => e,
         };
 
-        if let Some(reason) = error_to_retry_reason(&rs, &mut retry_info, &err) {
-            if let Some(duration) = rs
-                .maybe_retry(strategy.clone(), &mut retry_info, reason)
-                .await
-            {
+        if let Some(reason) = error_to_retry_reason(&rs.err_map, &mut retry_info, &err) {
+            if let Some(duration) = rs.manager.maybe_retry(&strategy, &mut retry_info, reason) {
                 debug!(
                     "Retrying {} after {:?} due to {}",
                     &retry_info, duration, reason
@@ -343,7 +423,7 @@ where
 }
 
 pub(crate) fn error_to_retry_reason(
-    rs: &Arc<RetryManager>,
+    err_map: &ErrMapComponent,
     retry_info: &mut RetryRequest,
     err: &Error,
 ) -> Option<RetryReason> {
@@ -352,8 +432,8 @@ pub(crate) fn error_to_retry_reason(
             retry_info.unique_id = err.has_opaque().map(|o| o.to_string());
 
             match err.kind() {
-                Server(e) => return server_error_to_retry_reason(rs, e),
-                Resource(e) => return server_error_to_retry_reason(rs, e.cause()),
+                Server(e) => return server_error_to_retry_reason(err_map, e),
+                Resource(e) => return server_error_to_retry_reason(err_map, e.cause()),
                 Cancelled(e) if e == &CancellationErrorKind::ClosedInFlight => {
                     return Some(RetryReason::SocketClosedWhileInFlight);
                 }
@@ -439,7 +519,7 @@ pub(crate) fn error_to_retry_reason(
     None
 }
 
-fn server_error_to_retry_reason(rs: &Arc<RetryManager>, e: &ServerError) -> Option<RetryReason> {
+fn server_error_to_retry_reason(err_map: &ErrMapComponent, e: &ServerError) -> Option<RetryReason> {
     match e.kind() {
         ServerErrorKind::NotMyVbucket => {
             return Some(RetryReason::KvNotMyVbucket);
@@ -465,7 +545,7 @@ fn server_error_to_retry_reason(rs: &Arc<RetryManager>, e: &ServerError) -> Opti
         ServerErrorKind::SyncWriteRecommitInProgress => {
             return Some(RetryReason::KvSyncWriteRecommitInProgress);
         }
-        ServerErrorKind::UnknownStatus { status } if rs.err_map_component.should_retry(status) => {
+        ServerErrorKind::UnknownStatus { status } if err_map.should_retry(status) => {
             return Some(RetryReason::KvErrorMapRetryIndicated);
         }
         _ => {}
@@ -493,8 +573,70 @@ mod tests {
     use http::StatusCode;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    fn make_retry_manager() -> Arc<RetryManager> {
-        Arc::new(RetryManager::new(Arc::new(ErrMapComponent::default())))
+    /// **A supplied manager overrides the reasons the default retries unasked.**
+    ///
+    /// This is the whole point of the trait and it needs pinning, because the
+    /// difference is invisible from the strategy: `always_retry` reasons are
+    /// decided *before* the strategy is consulted, so no `RetryStrategy` can
+    /// change them. `DefaultRetryManager` retries `KvCollectionOutdated`
+    /// indefinitely on a controlled backoff — correct for a client whose routing
+    /// state is merely behind, and a hang for an embedder whose keyspace was
+    /// dropped and will not come back until *it* recreates it.
+    #[test]
+    fn a_supplied_manager_can_decline_what_the_default_always_retries() {
+        #[derive(Debug)]
+        struct DeclineCollectionOutdated;
+
+        impl RetryManager for DeclineCollectionOutdated {
+            fn maybe_retry(
+                &self,
+                strategy: &Arc<dyn RetryStrategy>,
+                request: &mut RetryRequest,
+                reason: RetryReason,
+            ) -> Option<Duration> {
+                if reason == RetryReason::KvCollectionOutdated {
+                    return None;
+                }
+                DefaultRetryManager::default().maybe_retry(strategy, request, reason)
+            }
+        }
+
+        let strategy: Arc<dyn RetryStrategy> = Arc::new(FailFastRetryStrategy::default());
+
+        // The default retries it without asking the strategy — which is what
+        // makes it unreachable from a strategy, and why this trait exists.
+        let mut request = RetryRequest::new("upsert", false);
+        assert!(
+            DefaultRetryManager::default()
+                .maybe_retry(&strategy, &mut request, RetryReason::KvCollectionOutdated)
+                .is_some(),
+            "the default retries a stale collection id"
+        );
+
+        let mut request = RetryRequest::new("upsert", false);
+        assert!(
+            DeclineCollectionOutdated
+                .maybe_retry(&strategy, &mut request, RetryReason::KvCollectionOutdated)
+                .is_none(),
+            "a supplied manager declines it, so the caller sees the error"
+        );
+
+        // And only that reason: everything else still reaches the default, so
+        // replacing the manager is not a way to lose the retries that matter.
+        let mut request = RetryRequest::new("upsert", false);
+        assert!(
+            DeclineCollectionOutdated
+                .maybe_retry(&strategy, &mut request, RetryReason::KvNotMyVbucket)
+                .is_some(),
+            "a moved vbucket is still retried"
+        );
+    }
+
+    fn make_retry_manager() -> Arc<RetryComponent> {
+        Arc::new(RetryComponent::new(
+            Arc::new(ErrMapComponent::default()),
+            Arc::new(DefaultRetryManager::default()),
+        ))
     }
 
     fn make_query_server_error(kind: queryx::error::ServerErrorKind, retry: bool) -> Error {
@@ -515,7 +657,7 @@ mod tests {
         let mut retry_info = RetryRequest::new("query", false);
         let err = make_query_server_error(queryx::error::ServerErrorKind::Unknown, true);
 
-        let reason = error_to_retry_reason(&rs, &mut retry_info, &err);
+        let reason = error_to_retry_reason(rs.err_map(), &mut retry_info, &err);
         assert_eq!(reason, Some(RetryReason::QueryErrorRetryable));
     }
 
@@ -525,7 +667,7 @@ mod tests {
         let mut retry_info = RetryRequest::new("query", false);
         let err = make_query_server_error(queryx::error::ServerErrorKind::Unknown, false);
 
-        let reason = error_to_retry_reason(&rs, &mut retry_info, &err);
+        let reason = error_to_retry_reason(rs.err_map(), &mut retry_info, &err);
         assert_eq!(reason, None);
     }
 
@@ -538,7 +680,7 @@ mod tests {
             false,
         );
 
-        let reason = error_to_retry_reason(&rs, &mut retry_info, &err);
+        let reason = error_to_retry_reason(rs.err_map(), &mut retry_info, &err);
         assert_eq!(reason, Some(RetryReason::QueryPreparedStatementFailure));
     }
 
@@ -548,7 +690,7 @@ mod tests {
         let mut retry_info = RetryRequest::new("query", false);
         let err = make_query_server_error(queryx::error::ServerErrorKind::IndexNotFound, false);
 
-        let reason = error_to_retry_reason(&rs, &mut retry_info, &err);
+        let reason = error_to_retry_reason(rs.err_map(), &mut retry_info, &err);
         assert_eq!(reason, Some(RetryReason::QueryIndexNotFound));
     }
 

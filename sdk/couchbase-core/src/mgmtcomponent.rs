@@ -54,7 +54,7 @@ use crate::options::management::{
     SetMetaKv2Options, SyncMetaKv2QuorumOptions, UpdateBucketOptions, UpdateCollectionOptions,
     UpsertGroupOptions, UpsertUserOptions,
 };
-use crate::retry::{orchestrate_retries, RetryManager, RetryRequest};
+use crate::retry::{orchestrate_retries, RetryComponent, RetryRequest};
 use crate::retrybesteffort::ExponentialBackoffCalculator;
 use crate::service_type::ServiceType;
 use crate::tracingcomponent::TracingComponent;
@@ -70,7 +70,7 @@ pub(crate) struct MgmtComponent<C: Client> {
     http_component: HttpComponent<C>,
     tracing: Arc<TracingComponent>,
 
-    retry_manager: Arc<RetryManager>,
+    retry_manager: Arc<RetryComponent>,
 }
 
 pub(crate) struct MgmtComponentConfig {
@@ -85,7 +85,7 @@ pub(crate) struct MgmtComponentOptions {
 
 impl<C: Client> MgmtComponent<C> {
     pub fn new(
-        retry_manager: Arc<RetryManager>,
+        retry_manager: Arc<RetryComponent>,
         http_client: Arc<C>,
         tracing: Arc<TracingComponent>,
         config: MgmtComponentConfig,

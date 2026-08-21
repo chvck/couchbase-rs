@@ -20,8 +20,10 @@ use crate::address::Address;
 use crate::auth_mechanism::AuthMechanism;
 use crate::authenticator::Authenticator;
 use crate::memdx::dispatcher::OrphanResponseHandler;
+use crate::retry::RetryManager;
 use crate::tls_config::TlsConfig;
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -43,6 +45,13 @@ pub struct AgentOptions {
     pub http_config: HttpConfig,
     pub tcp_keep_alive_time: Option<Duration>,
     pub orphan_response_handler: Option<OrphanResponseHandler>,
+    /// Who decides whether a failed operation is retried.
+    ///
+    /// `None` uses the SDK's own [`DefaultRetryManager`]. Supply one when the
+    /// embedder already owns the recovery for a condition the SDK would otherwise
+    /// retry underneath it — see [`RetryManager`] for the case that motivated
+    /// this.
+    pub retry_manager: Option<Arc<dyn RetryManager>>,
 }
 
 impl Debug for AgentOptions {
@@ -77,6 +86,7 @@ impl AgentOptions {
             http_config: HttpConfig::default(),
             tcp_keep_alive_time: None,
             orphan_response_handler: None,
+            retry_manager: None,
         }
     }
 
@@ -140,6 +150,12 @@ impl AgentOptions {
         orphan_response_handler: OrphanResponseHandler,
     ) -> Self {
         self.orphan_response_handler = Some(orphan_response_handler);
+        self
+    }
+
+    /// Replace the retry manager. See [`RetryManager`].
+    pub fn retry_manager(mut self, retry_manager: Arc<dyn RetryManager>) -> Self {
+        self.retry_manager = Some(retry_manager);
         self
     }
 }
@@ -467,7 +483,7 @@ impl Display for AgentOptions {
 
         write!(
             f,
-            "{{ seed_config: {}, auth_mechanisms: {:?}, tls_config: {}, bucket_name: {:?}, network: {:?}, compression_config: {}, config_poller_config: {}, kv_config: {}, http_config: {}, tcp_keep_alive_time: {:?}, orphan_response_handler: {} }}",
+            "{{ seed_config: {}, auth_mechanisms: {:?}, tls_config: {}, bucket_name: {:?}, network: {:?}, compression_config: {}, config_poller_config: {}, kv_config: {}, http_config: {}, tcp_keep_alive_time: {:?}, orphan_response_handler: {}, retry_manager: {} }}",
             self.seed_config,
             self.auth_mechanisms,
             tls_config,
@@ -479,6 +495,7 @@ impl Display for AgentOptions {
             self.http_config,
             self.tcp_keep_alive_time,
             if self.orphan_response_handler.is_some() { "Some" } else { "None" },
+            if self.retry_manager.is_some() { "Some" } else { "None" },
         )
     }
 }

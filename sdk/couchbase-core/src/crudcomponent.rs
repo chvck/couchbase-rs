@@ -63,7 +63,7 @@ use crate::results::kv::{
 };
 use crate::results::stats::{CollectionStats, StatsEntry, StatsResult};
 use crate::retry::{
-    error_to_retry_reason, orchestrate_retries, RetryManager, RetryRequest, RetryStrategy,
+    error_to_retry_reason, orchestrate_retries, RetryComponent, RetryRequest, RetryStrategy,
 };
 use crate::vbucketrouter::{orchestrate_memd_routing, VbucketRouter};
 use bytes::Bytes;
@@ -89,7 +89,7 @@ pub(crate) struct CrudComponent<
     router: Arc<V>,
     nmvb_handler: Arc<Nmvb>,
     collections: Arc<C>,
-    retry_manager: Arc<RetryManager>,
+    retry_manager: Arc<RetryComponent>,
     compression_manager: Arc<CompressionManager<Comp>>,
 }
 
@@ -108,7 +108,7 @@ impl<
         conn_manager: Arc<M>,
         bulk_conn_manager: Arc<M>,
         collections: Arc<C>,
-        retry_manager: Arc<RetryManager>,
+        retry_manager: Arc<RetryComponent>,
         compression_manager: Arc<CompressionManager<Comp>>,
     ) -> Self {
         CrudComponent {
@@ -1260,12 +1260,12 @@ impl<
                 }
             }
 
-            if let Some(reason) = error_to_retry_reason(&self.retry_manager, &mut retry_info, &err)
+            if let Some(reason) =
+                error_to_retry_reason(self.retry_manager.err_map(), &mut retry_info, &err)
             {
-                if let Some(duration) = self
-                    .retry_manager
-                    .maybe_retry(opts.retry_strategy.clone(), &mut retry_info, reason)
-                    .await
+                if let Some(duration) =
+                    self.retry_manager
+                        .maybe_retry(&opts.retry_strategy, &mut retry_info, reason)
                 {
                     debug!(
                         "Retrying {} after {:?} due to {}",

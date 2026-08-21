@@ -36,7 +36,7 @@ use crate::queryx::query::{EncodedQuery, Query};
 use crate::queryx::query_options::{EnsureIndexPollOptions, PingOptions};
 use crate::results::pingreport::{EndpointPingReport, PingState};
 use crate::results::query::QueryResultStream;
-use crate::retry::{orchestrate_retries, RetryManager, RetryRequest, RetryStrategy};
+use crate::retry::{orchestrate_retries, RetryComponent, RetryRequest, RetryStrategy};
 use crate::retrybesteffort::ExponentialBackoffCalculator;
 use crate::service_type::ServiceType;
 use crate::tracingcomponent::TracingComponent;
@@ -56,7 +56,7 @@ pub(crate) struct QueryComponent<C: Client> {
     http_component: HttpComponent<C>,
     tracing: Arc<TracingComponent>,
 
-    retry_manager: Arc<RetryManager>,
+    retry_manager: Arc<RetryComponent>,
     prepared_cache: Arc<PreparedStatementCache>,
 }
 
@@ -72,7 +72,7 @@ pub(crate) struct QueryComponentOptions {
 
 impl<C: Client + 'static> QueryComponent<C> {
     pub fn new(
-        retry_manager: Arc<RetryManager>,
+        retry_manager: Arc<RetryComponent>,
         http_client: Arc<C>,
         tracing: Arc<TracingComponent>,
         config: QueryComponentConfig,

@@ -33,7 +33,7 @@ use crate::options::search_management::{
 };
 use crate::results::pingreport::{EndpointPingReport, PingState};
 use crate::results::search::SearchResultStream;
-use crate::retry::{orchestrate_retries, RetryManager, RetryRequest, RetryStrategy};
+use crate::retry::{orchestrate_retries, RetryComponent, RetryRequest, RetryStrategy};
 use crate::retrybesteffort::ExponentialBackoffCalculator;
 use crate::searchx::document_analysis::DocumentAnalysis;
 use crate::searchx::ensure_index_helper::EnsureIndexHelper;
@@ -59,7 +59,7 @@ pub(crate) struct SearchComponent<C: Client> {
     http_component: HttpComponent<C>,
     tracing: Arc<TracingComponent>,
 
-    retry_manager: Arc<RetryManager>,
+    retry_manager: Arc<RetryComponent>,
 
     state: ArcSwap<SearchComponentState>,
 }
@@ -84,7 +84,7 @@ pub(crate) struct SearchComponentOptions {
 
 impl<C: Client + 'static> SearchComponent<C> {
     pub fn new(
-        retry_manager: Arc<RetryManager>,
+        retry_manager: Arc<RetryComponent>,
         http_client: Arc<C>,
         tracing: Arc<TracingComponent>,
         config: SearchComponentConfig,

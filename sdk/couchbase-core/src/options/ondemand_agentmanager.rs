@@ -122,6 +122,10 @@ impl OnDemandAgentManagerOptions {
 impl From<OnDemandAgentManagerOptions> for AgentOptions {
     fn from(opts: OnDemandAgentManagerOptions) -> Self {
         AgentOptions {
+            // Not on the on-demand options: an embedder that wants its own
+            // manager builds the agent directly. Defaulting here keeps that
+            // surface unchanged.
+            retry_manager: None,
             tls_config: opts.tls_config,
             authenticator: opts.authenticator,
             bucket_name: None,
