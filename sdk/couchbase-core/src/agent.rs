@@ -115,6 +115,7 @@ struct AgentState {
     http_idle_connection_timeout: Duration,
     http_max_idle_connections_per_host: Option<usize>,
     tcp_keep_alive_time: Duration,
+    surface_bootstrap_errors: bool,
 }
 
 impl Display for AgentState {
@@ -534,6 +535,7 @@ impl Agent {
             tcp_keep_alive_time: opts
                 .tcp_keep_alive_time
                 .unwrap_or_else(|| Duration::from_secs(60)),
+            surface_bootstrap_errors: opts.surface_bootstrap_errors,
         };
 
         let bucket_name = opts.bucket_name.clone();
@@ -941,6 +943,11 @@ impl Agent {
         connect_timeout: Duration,
     ) -> Result<(ParsedConfig, String)> {
         loop {
+            // What each endpoint said this time round. Collected whether or not
+            // it will be returned, so that a failed pass can say why in one line
+            // instead of leaving the reasons scattered across the log.
+            let mut attempt_errs: HashMap<String, Error> = HashMap::new();
+
             for target in kv_targets.values() {
                 let host = &target.address;
                 let err_map_component_clone = err_map_component.clone();
@@ -982,10 +989,19 @@ impl Agent {
                                 msg = format!("{msg} - {source}");
                             }
                             warn!("{msg}");
+                            attempt_errs.insert(host.to_string(), e);
                             continue;
                         }
                     },
-                    Err(_e) => continue,
+                    Err(_e) => {
+                        attempt_errs.insert(
+                            host.to_string(),
+                            Error::new_message_error(format!(
+                                "timed out connecting to endpoint after {connect_timeout:?}"
+                            )),
+                        );
+                        continue;
+                    }
                 };
 
                 let raw_config = match client
@@ -995,7 +1011,10 @@ impl Agent {
                     .await
                 {
                     Ok(resp) => resp.config,
-                    Err(_e) => continue,
+                    Err(e) => {
+                        attempt_errs.insert(host.to_string(), Error::new_contextual_memdx_error(e));
+                        continue;
+                    }
                 };
 
                 client.close().await?;
@@ -1008,7 +1027,10 @@ impl Agent {
                     Ok(c) => {
                         return Ok((c, format!("{}:{}", host.host, host.port)));
                     }
-                    Err(_e) => continue,
+                    Err(e) => {
+                        attempt_errs.insert(host.to_string(), e);
+                        continue;
+                    }
                 };
             }
 
@@ -1042,11 +1064,18 @@ impl Agent {
                     Ok(c) => {
                         return Ok((c, host_port));
                     }
-                    Err(_e) => {}
+                    Err(e) => {
+                        attempt_errs.insert(host_port, e);
+                    }
                 };
             }
 
-            info!("Failed to fetch config from any source");
+            if state.surface_bootstrap_errors {
+                return Err(Error::new_bootstrap_all_failed_error(attempt_errs));
+            }
+
+            let err = Error::new_bootstrap_all_failed_error(attempt_errs);
+            info!("Failed to fetch config from any source, trying again: {err}");
 
             // TODO: Make configurable?
             sleep(Duration::from_secs(1)).await;
@@ -1231,5 +1260,88 @@ mod service_endpoint_tests {
             vec!["http://127.0.0.1:8091".to_string()]
         );
         assert!(endpoints_for(&endpoints, ServiceType::SEARCH).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+    use crate::authenticator::PasswordAuthenticator;
+    use crate::options::agent::SeedConfig;
+    use tokio::time::timeout;
+
+    /// A port nothing listens on, so an attempt against it fails, and fails fast.
+    async fn closed_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    /// Two ports, so a failure recorded against the memd seed is told apart from
+    /// the one recorded against the http seed rather than overwriting it.
+    async fn options_against_nothing(surface_bootstrap_errors: bool) -> AgentOptions {
+        let memd = Address {
+            host: "127.0.0.1".to_string(),
+            port: closed_port().await,
+        };
+        let http = Address {
+            host: "127.0.0.1".to_string(),
+            port: closed_port().await,
+        };
+
+        AgentOptions::new(
+            SeedConfig::new()
+                .memd_addrs(vec![memd])
+                .http_addrs(vec![http]),
+            Authenticator::PasswordAuthenticator(PasswordAuthenticator {
+                username: "user".to_string(),
+                password: "pass".to_string(),
+            }),
+        )
+        .surface_bootstrap_errors(surface_bootstrap_errors)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_reports_what_every_endpoint_said_when_asked() {
+        let opts = options_against_nothing(true).await;
+
+        let err = timeout(Duration::from_secs(10), Agent::new(opts))
+            .await
+            .expect("bootstrap should give up rather than start the seed list again")
+            .err()
+            .expect("bootstrapping against closed ports cannot have succeeded");
+
+        let errors = match err.kind() {
+            ErrorKind::BootstrapAllFailed { errors } => errors,
+            other => panic!("expected BootstrapAllFailed, got {other:?}"),
+        };
+
+        // Both seeds were tried, and each is answered for separately -- the point
+        // of keying by endpoint rather than reporting one failure for the set.
+        assert_eq!(
+            errors.len(),
+            2,
+            "expected one failure per seed, got: {}",
+            err
+        );
+
+        // And it reads as something a person can act on.
+        assert!(
+            err.to_string().starts_with("all bootstrap hosts failed ("),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_retries_the_seed_list_by_default() {
+        let opts = options_against_nothing(false).await;
+
+        let res = timeout(Duration::from_secs(3), Agent::new(opts)).await;
+
+        assert!(
+            res.is_err(),
+            "the default must keep retrying the seed list rather than reporting a failure"
+        );
     }
 }

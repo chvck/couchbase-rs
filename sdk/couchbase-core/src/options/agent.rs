@@ -44,6 +44,22 @@ pub struct AgentOptions {
     pub kv_config: KvConfig,
     pub http_config: HttpConfig,
     pub tcp_keep_alive_time: Option<Duration>,
+
+    /// Whether bootstrapping an agent gives up once every endpoint has failed,
+    /// rather than starting the list again.
+    ///
+    /// Off by default, which retries the seed list indefinitely. An agent whose
+    /// cluster is not up yet then arrives once it is, without the caller having
+    /// to arrange that -- but a cluster that will never accept these credentials
+    /// looks exactly the same from outside, and nothing is reported while it is
+    /// tried again.
+    ///
+    /// Turning it on returns [`ErrorKind::BootstrapAllFailed`] after one pass,
+    /// carrying what each endpoint said, which is what gocbcorex does. Bounding
+    /// how long to wait for a cluster that might still arrive is then the
+    /// caller's to decide, as deadlines are throughout this crate.
+    pub surface_bootstrap_errors: bool,
+
     pub orphan_response_handler: Option<OrphanResponseHandler>,
     /// Who decides whether a failed operation is retried.
     ///
@@ -67,6 +83,7 @@ impl Debug for AgentOptions {
             .field("kv_config", &self.kv_config)
             .field("http_config", &self.http_config)
             .field("tcp_keep_alive_time", &self.tcp_keep_alive_time)
+            .field("surface_bootstrap_errors", &self.surface_bootstrap_errors)
             .finish()
     }
 }
@@ -85,9 +102,15 @@ impl AgentOptions {
             kv_config: KvConfig::default(),
             http_config: HttpConfig::default(),
             tcp_keep_alive_time: None,
+            surface_bootstrap_errors: false,
             orphan_response_handler: None,
             retry_manager: None,
         }
+    }
+
+    pub fn surface_bootstrap_errors(mut self, surface_bootstrap_errors: bool) -> Self {
+        self.surface_bootstrap_errors = surface_bootstrap_errors;
+        self
     }
 
     pub fn seed_config(mut self, seed_config: SeedConfig) -> Self {

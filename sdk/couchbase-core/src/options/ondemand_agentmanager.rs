@@ -40,6 +40,10 @@ pub struct OnDemandAgentManagerOptions {
     pub kv_config: KvConfig,
     pub http_config: HttpConfig,
     pub tcp_keep_alive_time: Option<Duration>,
+    /// See [`AgentOptions::surface_bootstrap_errors`]. Carried here because the
+    /// manager bootstraps its cluster agent on the caller's behalf, so this is
+    /// the only place a caller of the manager could ask for it.
+    pub surface_bootstrap_errors: bool,
     pub orphan_response_handler: Option<OrphanResponseHandler>,
 }
 
@@ -56,6 +60,7 @@ impl OnDemandAgentManagerOptions {
             kv_config: KvConfig::default(),
             http_config: HttpConfig::default(),
             tcp_keep_alive_time: None,
+            surface_bootstrap_errors: false,
             orphan_response_handler: None,
         }
     }
@@ -110,6 +115,11 @@ impl OnDemandAgentManagerOptions {
         self
     }
 
+    pub fn surface_bootstrap_errors(mut self, surface_bootstrap_errors: bool) -> Self {
+        self.surface_bootstrap_errors = surface_bootstrap_errors;
+        self
+    }
+
     pub fn orphan_reporter_handler(
         mut self,
         orphan_response_handler: Option<OrphanResponseHandler>,
@@ -137,6 +147,7 @@ impl From<OnDemandAgentManagerOptions> for AgentOptions {
             kv_config: opts.kv_config,
             http_config: opts.http_config,
             tcp_keep_alive_time: opts.tcp_keep_alive_time,
+            surface_bootstrap_errors: opts.surface_bootstrap_errors,
             orphan_response_handler: opts.orphan_response_handler,
         }
     }
@@ -155,6 +166,7 @@ impl From<AgentOptions> for OnDemandAgentManagerOptions {
             kv_config: opts.kv_config,
             http_config: opts.http_config,
             tcp_keep_alive_time: opts.tcp_keep_alive_time,
+            surface_bootstrap_errors: opts.surface_bootstrap_errors,
             orphan_response_handler: opts.orphan_response_handler,
         }
     }

@@ -27,6 +27,7 @@ use crate::retry::RetryRequest;
 use crate::searchx::error::Error as SearchError;
 use crate::service_type::ServiceType;
 use crate::tracingcomponent::MetricsName;
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
@@ -73,6 +74,12 @@ impl Error {
 
     pub(crate) fn new_contextual_memdx_error(e: MemdxError) -> Self {
         Self::new(ErrorKind::Memdx(e))
+    }
+
+    pub(crate) fn new_bootstrap_all_failed_error(errors: HashMap<String, Error>) -> Self {
+        Self::new(ErrorKind::BootstrapAllFailed {
+            errors: BootstrapFailures::new(errors),
+        })
     }
 
     pub(crate) fn new_message_error(msg: impl Into<String>) -> Self {
@@ -190,6 +197,56 @@ pub enum ErrorKind {
     Internal {
         msg: String,
     },
+    /// Every endpoint an agent was given failed to supply a cluster config.
+    ///
+    /// Carries what each one said, keyed by endpoint, because with a seed list
+    /// the interesting part is usually that the answers differ -- one host
+    /// refused, another rejected the credentials.
+    #[non_exhaustive]
+    BootstrapAllFailed {
+        errors: BootstrapFailures,
+    },
+}
+
+/// What each endpoint said when none of them could supply a cluster config.
+///
+/// Keyed by endpoint, because with a seed list the interesting part is usually
+/// that the answers differ: one host refused the connection, another rejected
+/// the credentials.
+#[derive(Debug, Clone, Default)]
+pub struct BootstrapFailures(HashMap<String, Error>);
+
+impl BootstrapFailures {
+    pub(crate) fn new(errors: HashMap<String, Error>) -> Self {
+        Self(errors)
+    }
+
+    /// Why this endpoint failed, if it was one of those tried.
+    pub fn get(&self, endpoint: &str) -> Option<&Error> {
+        self.0.get(endpoint)
+    }
+
+    /// Every endpoint tried, with what it said, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Error)> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Compares which endpoints failed, not what they said: an [`Error`] is not
+/// itself comparable, and [`ErrorKind`] needs this only to answer whether two
+/// failures are the same kind of failure.
+impl PartialEq for BootstrapFailures {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len() && self.0.keys().all(|e| other.0.contains_key(e))
+    }
 }
 
 impl Display for ErrorKind {
@@ -219,6 +276,21 @@ impl Display for ErrorKind {
             ErrorKind::NoBucket => write!(f, "no bucket selected"),
             ErrorKind::IllegalState { msg } => write!(f, "illegal state: {msg}"),
             ErrorKind::NoVbucketMap => write!(f, "invalid vbucket map"),
+            ErrorKind::BootstrapAllFailed { errors } => {
+                // Sorted, so that the same set of failures reads the same way
+                // twice: a HashMap would otherwise reorder them per process.
+                let mut endpoints: Vec<_> = errors.iter().collect();
+
+                endpoints.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+                let detail = endpoints
+                    .into_iter()
+                    .map(|(endpoint, err)| format!("{endpoint}: {{{err}}}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                write!(f, "all bootstrap hosts failed ({detail})")
+            }
             ErrorKind::CollectionManifestOutdated {
                 manifest_uid,
                 server_manifest_uid,
@@ -287,6 +359,7 @@ impl MetricsName for ErrorKind {
             ErrorKind::NoBucket => "NoBucket",
             ErrorKind::IllegalState { .. } => "IllegalState",
             ErrorKind::NoVbucketMap => "NoVbucketMap",
+            ErrorKind::BootstrapAllFailed { .. } => "BootstrapAllFailed",
             ErrorKind::NoServerAssigned { .. } => "NoServerAssigned",
             ErrorKind::CollectionManifestOutdated { .. } => "CollectionManifestOutdated",
             ErrorKind::Message { .. } => "_OTHER",
