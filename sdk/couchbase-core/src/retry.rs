@@ -441,6 +441,21 @@ pub(crate) fn error_to_retry_reason(
                 _ => {}
             }
         }
+        // **Not an answer, so not classified as one.** A surfaced connect error
+        // is the reason a connection could not be made, not something a server
+        // said about this operation, and reading it as one is how a password the
+        // server refuses -- which arrives as `UnknownStatus { status: AuthError }`
+        // -- reached the error map below and was retried or not depending on what
+        // the map said about `0x20`. The caller asked to be told; telling it is
+        // this crate declining to retry.
+        //
+        // Falls through to `None` without this arm. Written out because the
+        // silence would otherwise read as an oversight, and because
+        // `KvConfig::surface_connect_errors` is the only thing that produces the
+        // kind at all.
+        ErrorKind::ConnectFailed { .. } => {
+            return None;
+        }
         ErrorKind::NoVbucketMap => {
             return Some(RetryReason::KvInvalidVbucketMap);
         }

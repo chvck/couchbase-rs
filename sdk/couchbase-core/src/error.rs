@@ -59,6 +59,9 @@ impl StdError for Error {
             ErrorKind::Http(err) => err.source(),
             ErrorKind::Mgmt(err) => err.source(),
             ErrorKind::Indexer(err) => err.source(),
+            // The attempt's own error, so wrapping a connect failure does not
+            // cost a caller the cause chain it had before.
+            ErrorKind::ConnectFailed { source, .. } => Some(source.cause()),
             _ => None,
         }
     }
@@ -79,6 +82,20 @@ impl Error {
     pub(crate) fn new_bootstrap_all_failed_error(errors: HashMap<String, Error>) -> Self {
         Self::new(ErrorKind::BootstrapAllFailed {
             errors: BootstrapFailures::new(errors),
+        })
+    }
+
+    /// A connect failure against `endpoint`, carrying what the attempt said.
+    ///
+    /// **Public, unlike its neighbours**, for the reason `a6917a0e` made the
+    /// crate's errors constructible: an embedder that classifies on
+    /// [`ErrorKind::ConnectFailed`] has to be able to build one to test that it
+    /// does, and the variant is `#[non_exhaustive]` so a struct literal will not
+    /// do.
+    pub fn new_connect_failed_error(endpoint: impl Into<String>, cause: Error) -> Self {
+        Self::new(ErrorKind::ConnectFailed {
+            endpoint: endpoint.into(),
+            source: ConnectAttemptFailure::new(cause),
         })
     }
 
@@ -206,6 +223,37 @@ pub enum ErrorKind {
     BootstrapAllFailed {
         errors: BootstrapFailures,
     },
+
+    /// An operation could not get a connection to a KV endpoint, and
+    /// [`KvConfig::surface_connect_errors`] asked for the reason rather than a
+    /// wait.
+    ///
+    /// **The provenance is the point.** The pool knows this error came from a
+    /// connect attempt because of where it stored it, so it says so here rather
+    /// than handing back the attempt's own error and leaving a caller to work it
+    /// out. Working it out is not reliably possible: a refused dial is
+    /// `memdx::ErrorKind::ConnectionFailed`, a node lost mid-bootstrap is
+    /// `Close`, `Io` or `Cancelled`, and a password the server refuses arrives as
+    /// `Server(UnknownStatus { status: AuthError })` -- shaped exactly like a
+    /// status the server returned to the operation itself.
+    ///
+    /// That last shape is also why this is not merely tidier. Left raw, the
+    /// failure reaches [`crate::retry`] as a server's answer and is classified as
+    /// one: `UnknownStatus` is put to the server-supplied error map, so whether a
+    /// rotated password reached the caller or was retried under a best-effort
+    /// strategy depended on what that map said about `0x20`. A connect failure is
+    /// not an answer about the operation, and this kind is not routed through
+    /// answer classification.
+    ///
+    /// Only produced when the option is on; with it off an operation waits as
+    /// before and this kind never appears.
+    #[non_exhaustive]
+    ConnectFailed {
+        /// The endpoint that could not be reached.
+        endpoint: String,
+        /// What the last connect attempt against it said.
+        source: ConnectAttemptFailure,
+    },
 }
 
 /// What each endpoint said when none of them could supply a cluster config.
@@ -246,6 +294,42 @@ impl BootstrapFailures {
 impl PartialEq for BootstrapFailures {
     fn eq(&self, other: &Self) -> bool {
         self.0.len() == other.0.len() && self.0.keys().all(|e| other.0.contains_key(e))
+    }
+}
+
+/// What a connect attempt said, carried by [`ErrorKind::ConnectFailed`].
+///
+/// **A newtype for the reason [`BootstrapFailures`] is one**: `ErrorKind` derives
+/// `PartialEq` and [`Error`] does not implement it, so holding an `Error` inside
+/// a kind means writing the comparison rather than deriving it.
+#[derive(Debug, Clone)]
+pub struct ConnectAttemptFailure(Error);
+
+impl ConnectAttemptFailure {
+    pub(crate) fn new(cause: Error) -> Self {
+        Self(cause)
+    }
+
+    /// What the attempt said.
+    pub fn cause(&self) -> &Error {
+        &self.0
+    }
+}
+
+impl PartialEq for ConnectAttemptFailure {
+    /// **The endpoint decides, not the cause**, which is the rule
+    /// [`BootstrapFailures`] uses when it compares its keys and not its values.
+    /// The endpoint sits beside this in the kind and is compared by the derive,
+    /// so two failures against the same endpoint are the same failure however
+    /// differently the last attempt happened to fail.
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Display for ConnectAttemptFailure {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -290,6 +374,9 @@ impl Display for ErrorKind {
                     .join(", ");
 
                 write!(f, "all bootstrap hosts failed ({detail})")
+            }
+            ErrorKind::ConnectFailed { endpoint, source } => {
+                write!(f, "could not connect to {endpoint}: {source}")
             }
             ErrorKind::CollectionManifestOutdated {
                 manifest_uid,
@@ -347,6 +434,7 @@ impl MetricsName for ErrorKind {
             ErrorKind::Mgmt(err) => err.metrics_name(),
             ErrorKind::Indexer(err) => err.metrics_name(),
             ErrorKind::IndexRouting(_) => "IndexRouting",
+            ErrorKind::ConnectFailed { .. } => "ConnectFailed",
             ErrorKind::InvalidArgument { .. } => "InvalidArgument",
             ErrorKind::ServiceNotAvailable { .. } => "ServiceNotAvailable",
             ErrorKind::FeatureNotAvailable { .. } => "FeatureNotAvailable",

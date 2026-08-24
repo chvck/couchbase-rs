@@ -633,7 +633,21 @@ impl<K: KvClient + KvClientOps + 'static> KvClientBabysitter for StdKvClientBaby
                         "Client babysitter {} answering with stored connect error: {}",
                         &self.id, &err
                     );
-                    return Err(err);
+                    // **Said, not merely handed back.** The attempt's own error
+                    // does not record that it came from connecting, and a caller
+                    // cannot reliably infer it: a refused dial is
+                    // `ConnectionFailed`, but a password the server refuses is
+                    // `Server(UnknownStatus { status: AuthError })`, which is
+                    // shaped like a status returned to the operation itself. Left
+                    // raw it is also *classified* as one -- `error_to_retry_reason`
+                    // puts `UnknownStatus` to the error map, so a rotated password
+                    // was retried or not depending on what the server said about
+                    // `0x20`. This is the provenance the pool has and the caller
+                    // cannot reconstruct.
+                    return Err(Error::new_connect_failed_error(
+                        self.endpoint_id.clone(),
+                        err,
+                    ));
                 }
             }
 
@@ -781,7 +795,7 @@ mod tests {
     use super::*;
     use crate::address::Address;
     use crate::authenticator::PasswordAuthenticator;
-    use crate::kvclient::{KvClientBootstrapOptions, StdKvClient};
+    use crate::kvclient::{KvClientBootstrapOptions, OnErrMapFetchedHandler, StdKvClient};
     use crate::memdx::client::Client;
     use crate::tracingcomponent::TracingComponentConfig;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -812,6 +826,26 @@ mod tests {
             port: closed_port().await,
         };
 
+        babysitter_against(
+            address,
+            "user".to_string(),
+            "pass".to_string(),
+            surface_connect_errors,
+            None,
+        )
+        .await
+    }
+
+    async fn babysitter_against(
+        address: Address,
+        username: String,
+        password: String,
+        surface_connect_errors: bool,
+        on_err_map_fetched: Option<OnErrMapFetchedHandler>,
+    ) -> (
+        StdKvClientBabysitter<TestClient>,
+        UnboundedReceiver<KvClientStateChange<TestClient>>,
+    ) {
         // Held and handed back: dropping the receiver would only lose a state
         // change this test never reads, but keeping it is closer to the real
         // arrangement.
@@ -829,7 +863,7 @@ mod tests {
                 disable_error_map: false,
                 disable_mutation_tokens: false,
                 disable_server_durations: false,
-                on_err_map_fetched: None,
+                on_err_map_fetched,
                 tcp_keep_alive_time: Duration::from_secs(60),
                 auth_mechanisms: vec![],
                 connect_timeout: Duration::from_millis(500),
@@ -844,8 +878,8 @@ mod tests {
                 tls_config: None,
             },
             auth: Authenticator::PasswordAuthenticator(PasswordAuthenticator {
-                username: "user".to_string(),
-                password: "pass".to_string(),
+                username,
+                password,
             }),
             selected_bucket: None,
             tracing: Arc::new(TracingComponent::new(TracingComponentConfig {
@@ -864,9 +898,82 @@ mod tests {
             .await
             .expect("get_client should answer with the connect error, not wait for a reconnect");
 
+        let err = match res {
+            Ok(_) => panic!("connecting to a closed port cannot have succeeded"),
+            Err(e) => e,
+        };
+
+        // **The kind, not just that it failed.** Answering the caller is only
+        // half of it: an error indistinguishable from a server's answer leaves
+        // the caller doing kind archaeology to find out what it was told, and
+        // gets classified as an answer by `error_to_retry_reason` on the way.
         assert!(
-            res.is_err(),
-            "connecting to a closed port cannot have succeeded"
+            matches!(err.kind(), ErrorKind::ConnectFailed { .. }),
+            "a surfaced connect error has to say that is what it is: {err}"
+        );
+    }
+
+    /// **What a password the server refuses actually looks like.**
+    ///
+    /// Against a real KV endpoint rather than a closed port, because a closed
+    /// port can only produce a dial failure and the shape that matters here is
+    /// the other one: SASL is refused by a server that *answered*, so the
+    /// failure arrives carrying a memcached status and looking exactly like a
+    /// status returned to an operation. That is the reason a caller cannot
+    /// classify a surfaced connect error by reading kinds, and the reason this
+    /// crate marks it instead.
+    ///
+    /// Skipped unless `RCBKVADDR` names a live endpoint as `host:port`.
+    #[tokio::test]
+    async fn a_refused_password_surfaces_as_a_connect_failure() {
+        let Some(addr) = std::env::var("RCBKVADDR").ok().filter(|a| !a.is_empty()) else {
+            eprintln!("RCBKVADDR is not set; skipping the live-cluster probe");
+            return;
+        };
+        let (host, port) = addr.rsplit_once(':').expect("RCBKVADDR must be host:port");
+        let address = Address {
+            host: host.to_string(),
+            port: port.parse().expect("RCBKVADDR port must be a number"),
+        };
+
+        let (babysitter, _rx) = babysitter_against(
+            address,
+            std::env::var("RCBUSER").unwrap_or_else(|_| "Administrator".to_string()),
+            "definitely-not-the-password".to_string(),
+            true,
+            None,
+        )
+        .await;
+
+        let res = timeout(Duration::from_secs(10), babysitter.get_client())
+            .await
+            .expect("a refused password must be answered, not waited on");
+
+        let err = match res {
+            Ok(_) => panic!("a wrong password cannot have authenticated"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(err.kind(), ErrorKind::ConnectFailed { .. }),
+            "a refused password has to arrive as a connect failure: {err}"
+        );
+
+        // **And the cause is why the wrapper exists.** Measured against Couchbase
+        // 8.x, a refused SASL step arrives as
+        // `Server(UnknownStatus { status: AuthError })` -- a memcached status,
+        // shaped exactly like one returned to a data operation, and put to the
+        // server's own error map by `error_to_retry_reason` on the way past. The
+        // status is asserted rather than the whole kind, because the *kind* is
+        // only `UnknownStatus` for as long as `OpsCore::decode_error` has no arm
+        // for `0x20`, and that is this crate's business to change.
+        let ErrorKind::ConnectFailed { source, .. } = err.kind() else {
+            unreachable!()
+        };
+        let rendered = source.cause().to_string();
+        assert!(
+            rendered.contains("0x20"),
+            "a refused password should carry the auth status: {rendered}"
         );
     }
 

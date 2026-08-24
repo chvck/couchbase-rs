@@ -126,6 +126,7 @@ where
     id: String,
 
     client_idx: AtomicUsize,
+    endpoint_id: String,
     surface_connect_errors: bool,
     fast_map: Arc<ArcSwap<KvClientPoolFastMap<K>>>,
 
@@ -235,6 +236,7 @@ where
         StdKvClientPool {
             id,
             client_idx: Default::default(),
+            endpoint_id: opts.endpoint_id.clone(),
             surface_connect_errors: opts.surface_connect_errors,
             fast_map,
             babysitters,
@@ -370,7 +372,13 @@ where
                     .iter()
                     .find_map(|entry| entry.connect_err.clone())
                 {
-                    return Err(err);
+                    // Wrapped for the reason the babysitter wraps its own: the
+                    // pool knows this came from a connect attempt, and nothing in
+                    // the attempt's error records that.
+                    return Err(Error::new_connect_failed_error(
+                        self.endpoint_id.clone(),
+                        err,
+                    ));
                 }
             }
 
@@ -481,9 +489,16 @@ mod tests {
             .await
             .expect("the pool should answer with a connect error, not wait for a reconnect");
 
+        let err = match res {
+            Ok(_) => panic!("connecting to a closed port cannot have succeeded"),
+            Err(e) => e,
+        };
+
+        // The kind too, for the reason the babysitter's own test gives: a caller
+        // that cannot tell this from a server's answer has not really been told.
         assert!(
-            res.is_err(),
-            "connecting to a closed port cannot have succeeded"
+            matches!(err.kind(), crate::error::ErrorKind::ConnectFailed { .. }),
+            "a surfaced connect error has to say that is what it is: {err}"
         );
     }
 
@@ -521,10 +536,13 @@ mod tests {
 
         // Lands on the first babysitter, and pays for the dial.
         let first = timeout(connect_timeout * 3, pool.get_client()).await;
-        assert!(
-            first.expect("the first call should answer").is_err(),
-            "a reserved address cannot have connected"
-        );
+        match first.expect("the first call should answer") {
+            Ok(_) => panic!("a reserved address cannot have connected"),
+            Err(e) => assert!(
+                matches!(e.kind(), crate::error::ErrorKind::ConnectFailed { .. }),
+                "a surfaced connect error has to say that is what it is: {e}"
+            ),
+        }
 
         // Would land on the second babysitter, which has never dialled. Its
         // neighbour's recorded failure is the answer.
