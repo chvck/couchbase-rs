@@ -35,7 +35,9 @@ use crate::kvclient::{
     KvClient, KvClientBootstrapOptions, KvClientOptions, OnErrMapFetchedHandler,
     OnKvClientCloseHandler, UnsolicitedPacketSender,
 };
-use crate::kvclient_babysitter::{KvClientBabysitter, KvClientBabysitterOptions, KvTarget};
+use crate::kvclient_babysitter::{
+    KvClientBabysitter, KvClientBabysitterOptions, KvClientStateChange, KvTarget,
+};
 use crate::kvclient_ops::KvClientOps;
 use crate::memdx::dispatcher::{Dispatcher, OrphanResponseHandler, UnsolicitedPacketHandler};
 use crate::memdx::request::PingRequest;
@@ -79,6 +81,7 @@ pub(crate) struct KvClientPoolOptions {
     pub bootstrap_options: KvClientBootstrapOptions,
     pub endpoint_id: String,
     pub on_demand_connect: bool,
+    pub surface_connect_errors: bool,
 
     pub target: KvTarget,
     pub auth: Authenticator,
@@ -101,6 +104,7 @@ where
 {
     babysitter: Arc<B>,
     client: Option<Arc<K>>,
+    connect_err: Option<Error>,
 }
 
 impl<B, K> Drop for KvClientPoolEntry<B, K>
@@ -122,6 +126,7 @@ where
     id: String,
 
     client_idx: AtomicUsize,
+    surface_connect_errors: bool,
     fast_map: Arc<ArcSwap<KvClientPoolFastMap<K>>>,
 
     babysitters: Arc<Mutex<Vec<KvClientPoolEntry<B, K>>>>,
@@ -162,6 +167,7 @@ where
                     id: babysitter_id,
                     endpoint_id: opts.endpoint_id.clone(),
                     on_demand_connect: opts.on_demand_connect,
+                    surface_connect_errors: opts.surface_connect_errors,
 
                     connect_throttle_period: opts.connect_throttle_period,
                     disable_decompression: opts.disable_decompression,
@@ -180,6 +186,7 @@ where
                     KvClientPoolEntry {
                         babysitter: Arc::new(babysitter),
                         client: None,
+                        connect_err: None,
                     },
                 );
             }
@@ -193,10 +200,10 @@ where
         let id_clone = id.clone();
         tokio::spawn(async move {
             loop {
-                let (babysitter_id, client) = select! {
-                    Some((babysitter_id, client)) = state_change_rx.recv() => {
-                        debug!("Client pool {} received state change for babysitter {}, has client: {}", &id_clone, &babysitter_id, client.is_some());
-                        (babysitter_id, client)
+                let change = select! {
+                    Some(change) = state_change_rx.recv() => {
+                        debug!("Client pool {} received state change for babysitter {}, has client: {}", &id_clone, &change.babysitter_id, change.client.is_some());
+                        change
                     },
                     _ = shutdown_token_clone.cancelled() => {
                         debug!("Client pool {} state change handler shutting down", &id_clone);
@@ -208,9 +215,10 @@ where
 
                 let entry = guard
                     .iter_mut()
-                    .find(|entry| entry.babysitter.id() == babysitter_id);
+                    .find(|entry| entry.babysitter.id() == change.babysitter_id);
                 if let Some(entry) = entry {
-                    entry.client = client;
+                    entry.client = change.client;
+                    entry.connect_err = change.connect_err;
                 }
 
                 let mut clients = vec![];
@@ -227,6 +235,7 @@ where
         StdKvClientPool {
             id,
             client_idx: Default::default(),
+            surface_connect_errors: opts.surface_connect_errors,
             fast_map,
             babysitters,
             shutdown_token,
@@ -343,6 +352,28 @@ where
                     &self.id
                 )));
             }
+            // Nothing is connected, so prefer a babysitter that knows why over
+            // one that is still trying: the round-robin pick could otherwise sit
+            // through a dial that takes the whole connect timeout while its
+            // neighbour was refused immediately. gocbcorex reads every manager
+            // for the same reason, and delegates instead when there is only one
+            // to read.
+            //
+            // Only when asked. Without the option a babysitter keeps its reason
+            // to itself and waiting is the answer, so the pool must not go behind
+            // its back and hand one over.
+            if self.surface_connect_errors
+                && babysitters.len() > 1
+                && babysitters.iter().all(|entry| entry.client.is_none())
+            {
+                if let Some(err) = babysitters
+                    .iter()
+                    .find_map(|entry| entry.connect_err.clone())
+                {
+                    return Err(err);
+                }
+            }
+
             let client_idx = self.client_idx.fetch_add(1, Ordering::Relaxed);
 
             babysitters[client_idx % babysitters.len()]
@@ -362,5 +393,153 @@ where
     fn drop(&mut self) {
         self.shutdown_token.cancel();
         info!("Dropping StdKvClientPool {}", self.id,);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::address::Address;
+    use crate::authenticator::PasswordAuthenticator;
+    use crate::kvclient::StdKvClient;
+    use crate::kvclient_babysitter::StdKvClientBabysitter;
+    use crate::memdx::client::Client;
+    use crate::tracingcomponent::{TracingComponent, TracingComponentConfig};
+    use std::time::Instant;
+    use tokio::time::timeout;
+
+    type TestClient = StdKvClient<Client>;
+    type TestPool = StdKvClientPool<StdKvClientBabysitter<TestClient>, TestClient>;
+
+    /// A port nothing listens on, so a connect attempt fails, and fails fast.
+    async fn closed_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    async fn pool_of(
+        num_connections: usize,
+        surface_connect_errors: bool,
+        host: String,
+        port: u16,
+        connect_timeout: Duration,
+    ) -> TestPool {
+        let address = Address { host, port };
+
+        TestPool::new(KvClientPoolOptions {
+            id: "test-pool".to_string(),
+            num_connections,
+            connect_throttle_period: Duration::from_millis(50),
+            disable_decompression: false,
+            bootstrap_options: KvClientBootstrapOptions {
+                client_name: "test".to_string(),
+                disable_error_map: false,
+                disable_mutation_tokens: false,
+                disable_server_durations: false,
+                on_err_map_fetched: None,
+                tcp_keep_alive_time: Duration::from_secs(60),
+                auth_mechanisms: vec![],
+                connect_timeout,
+            },
+            endpoint_id: "test-endpoint".to_string(),
+            // On demand, so each babysitter dials only once it is asked for.
+            on_demand_connect: true,
+            surface_connect_errors,
+            target: KvTarget {
+                address: address.clone(),
+                canonical_address: address,
+                tls_config: None,
+            },
+            auth: Authenticator::PasswordAuthenticator(PasswordAuthenticator {
+                username: "user".to_string(),
+                password: "pass".to_string(),
+            }),
+            selected_bucket: None,
+            unsolicited_packet_tx: None,
+            orphan_handler: None,
+            tracing: Arc::new(TracingComponent::new(TracingComponentConfig {
+                cluster_labels: None,
+            })),
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_pool_of_several_answers_with_a_connect_error_when_asked() {
+        let pool = pool_of(
+            2,
+            true,
+            "127.0.0.1".to_string(),
+            closed_port().await,
+            Duration::from_millis(500),
+        )
+        .await;
+
+        let res = timeout(Duration::from_secs(5), pool.get_client())
+            .await
+            .expect("the pool should answer with a connect error, not wait for a reconnect");
+
+        assert!(
+            res.is_err(),
+            "connecting to a closed port cannot have succeeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pool_of_several_waits_by_default() {
+        let pool = pool_of(
+            2,
+            false,
+            "127.0.0.1".to_string(),
+            closed_port().await,
+            Duration::from_millis(500),
+        )
+        .await;
+
+        let res = timeout(Duration::from_millis(600), pool.get_client()).await;
+
+        assert!(
+            res.is_err(),
+            "the default must keep waiting for a connection rather than answering with the connect error"
+        );
+    }
+
+    /// The point of reading every babysitter rather than the one the round-robin
+    /// lands on: a neighbour that already knows why answers now, instead of the
+    /// pick spending its whole connect timeout finding out for itself.
+    ///
+    /// Addressed at TEST-NET-1, which is reserved and normally routed nowhere, so
+    /// the first attempt spends the timeout. A network that refuses it outright
+    /// instead makes the first call fast too, which leaves this asserting less
+    /// than it means to -- but never failing for the wrong reason.
+    #[tokio::test]
+    async fn a_pool_reads_every_babysitter_not_just_the_one_it_picked() {
+        let connect_timeout = Duration::from_secs(3);
+        let pool = pool_of(2, true, "192.0.2.1".to_string(), 11210, connect_timeout).await;
+
+        // Lands on the first babysitter, and pays for the dial.
+        let first = timeout(connect_timeout * 3, pool.get_client()).await;
+        assert!(
+            first.expect("the first call should answer").is_err(),
+            "a reserved address cannot have connected"
+        );
+
+        // Would land on the second babysitter, which has never dialled. Its
+        // neighbour's recorded failure is the answer.
+        let started = Instant::now();
+        let second = timeout(connect_timeout * 3, pool.get_client()).await;
+        assert!(
+            second.expect("the second call should answer").is_err(),
+            "a reserved address cannot have connected"
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the second call took {:?}, so it dialled again rather than reading the failure \
+             its neighbour had already recorded",
+            started.elapsed()
+        );
     }
 }

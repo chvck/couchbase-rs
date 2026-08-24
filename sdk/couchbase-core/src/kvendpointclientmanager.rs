@@ -72,6 +72,7 @@ pub(crate) struct KvEndpointClientManagerOptions {
     pub on_close_handler: KvEndpointClientManagerCloseHandler,
 
     pub on_demand_connect: bool,
+    pub surface_connect_errors: bool,
     pub num_pool_connections: usize,
     pub connect_throttle_period: Duration,
     pub disable_decompression: bool,
@@ -113,6 +114,7 @@ where
     on_close_handler: KvEndpointClientManagerCloseHandler,
 
     on_demand_connect: bool,
+    surface_connect_errors: bool,
     num_pool_connections: usize,
     connect_throttle_period: Duration,
     disable_decompression: bool,
@@ -147,6 +149,7 @@ where
             id: opts.id,
             on_close_handler: opts.on_close_handler,
             on_demand_connect: opts.on_demand_connect,
+            surface_connect_errors: opts.surface_connect_errors,
             num_pool_connections: opts.num_pool_connections,
             connect_throttle_period: opts.connect_throttle_period,
             disable_decompression: opts.disable_decompression,
@@ -220,6 +223,7 @@ where
                 let pool = P::new(KvClientPoolOptions {
                     id: pool_id,
                     on_demand_connect: self.on_demand_connect,
+                    surface_connect_errors: self.surface_connect_errors,
                     num_connections: self.num_pool_connections,
                     connect_throttle_period: self.connect_throttle_period,
                     disable_decompression: self.disable_decompression,

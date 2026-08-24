@@ -624,6 +624,7 @@ impl Agent {
                 id: conn_mgr_id,
                 on_close_handler: Arc::new(|_manager_id| {}),
                 on_demand_connect: opts.kv_config.on_demand_connect,
+                surface_connect_errors: opts.kv_config.surface_connect_errors,
                 num_pool_connections,
                 connect_throttle_period: opts.kv_config.connect_throttle_timeout,
                 bootstrap_options: KvClientBootstrapOptions {
@@ -663,6 +664,7 @@ impl Agent {
                 id: bulk_conn_mgr_id,
                 on_close_handler: Arc::new(|_manager_id| {}),
                 on_demand_connect: true,
+                surface_connect_errors: opts.kv_config.surface_connect_errors,
                 num_pool_connections: opts.kv_config.num_bulk_connections,
                 connect_throttle_period: opts.kv_config.connect_throttle_timeout,
                 bootstrap_options: bulk_bootstrap_options,

@@ -29,6 +29,16 @@ pub struct EndpointDiagnostics {
     pub last_activity: Option<i64>,
     pub namespace: Option<String>,
     pub state: ConnectionState,
+
+    /// Why the most recent attempt to establish this connection failed, if it
+    /// did.
+    ///
+    /// `Some` means the last attempt failed and another is coming: it is cleared
+    /// the moment one succeeds, so this is never a failure the endpoint has
+    /// since recovered from. Without it a down endpoint reports only that it is
+    /// `Disconnected`, and whether that is a slow server or a refused password
+    /// is left in the log.
+    pub last_connect_error: Option<String>,
 }
 
 #[derive(Debug)]

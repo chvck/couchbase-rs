@@ -59,7 +59,19 @@ pub(crate) struct KvTarget {
     pub tls_config: Option<TlsConfig>,
 }
 
-pub(crate) type KvClientStateChangeHandler<K> = UnboundedSender<(String, Option<Arc<K>>)>;
+/// What a babysitter tells its pool when its connection state changes.
+pub(crate) struct KvClientStateChange<K> {
+    pub babysitter_id: String,
+    pub client: Option<Arc<K>>,
+    /// Why the most recent connect attempt failed, when one has.
+    ///
+    /// Carried so the pool can answer for an endpoint on behalf of a babysitter
+    /// other than the one it happened to pick. Cleared by the next success,
+    /// because it arrives alongside the client rather than separately.
+    pub connect_err: Option<Error>,
+}
+
+pub(crate) type KvClientStateChangeHandler<K> = UnboundedSender<KvClientStateChange<K>>;
 
 pub(crate) trait KvClientBabysitter {
     type Client: KvClient + KvClientOps + Send + Sync;
@@ -85,6 +97,7 @@ pub(crate) struct KvClientBabysitterOptions<K: KvClient> {
     pub id: String,
 
     pub on_demand_connect: bool,
+    pub surface_connect_errors: bool,
     pub connect_throttle_period: Duration,
     pub disable_decompression: bool,
     pub bootstrap_opts: KvClientBootstrapOptions,
@@ -152,6 +165,7 @@ pub(crate) struct StdKvClientBabysitter<K: KvClient> {
     id: String,
     endpoint_id: String,
     on_demand_connect: bool,
+    surface_connect_errors: bool,
 
     connect_throttle_period: Duration,
 
@@ -315,6 +329,11 @@ impl<K: KvClient + 'static> StdKvClientBabysitter<K> {
                             guard.is_building = false;
                             guard.current_state = ConnectionState::Connected;
                             guard.client = Some(client.clone());
+                            // This connection works, so the last failure is
+                            // history: it must not be handed to a later caller
+                            // as though it were still the state of things, nor
+                            // throttle the next attempt after this one drops.
+                            guard.connect_err = None;
                         }
 
                         client_opts
@@ -334,10 +353,11 @@ impl<K: KvClient + 'static> StdKvClientBabysitter<K> {
                             }
                         }
 
-                        if let Err(e) = client_opts
-                            .state_change_handler
-                            .send((client_opts.id.clone(), Some(client)))
-                        {
+                        if let Err(e) = client_opts.state_change_handler.send(KvClientStateChange {
+                            babysitter_id: client_opts.id.clone(),
+                            client: Some(client),
+                            connect_err: None,
+                        }) {
                             debug!(
                                 "Client babysitter {} failed to notify of new client {}",
                                 &client_opts.id, e
@@ -376,9 +396,14 @@ impl<K: KvClient + 'static> StdKvClientBabysitter<K> {
                                 ));
                             }
 
-                            if let Err(e) = on_close_opts
-                                .state_change_handler
-                                .send((on_close_opts.id.clone(), None))
+                            if let Err(e) =
+                                on_close_opts
+                                    .state_change_handler
+                                    .send(KvClientStateChange {
+                                        babysitter_id: on_close_opts.id.clone(),
+                                        client: None,
+                                        connect_err: None,
+                                    })
                             {
                                 debug!(
                                     "Client babysitter {} failed to notify of closed client {}: {}",
@@ -410,13 +435,33 @@ impl<K: KvClient + 'static> StdKvClientBabysitter<K> {
                         }
                         info!("{msg}");
 
-                        let mut guard = state.lock().unwrap();
+                        {
+                            let mut guard = state.lock().unwrap();
 
-                        guard.current_state = ConnectionState::Disconnected;
-                        guard.connect_err = Some(ConnectionError {
-                            connect_error: e,
-                            connect_error_time: Instant::now(),
+                            guard.current_state = ConnectionState::Disconnected;
+                            guard.connect_err = Some(ConnectionError {
+                                connect_error: e.clone(),
+                                connect_error_time: Instant::now(),
+                            });
+                        }
+
+                        // The pool keeps its own copy, so that a caller asking it
+                        // for any connection can be answered by this failure even
+                        // when it picked one of our neighbours.
+                        let _ = client_opts.state_change_handler.send(KvClientStateChange {
+                            babysitter_id: client_opts.id.clone(),
+                            client: None,
+                            connect_err: Some(e),
                         });
+
+                        // Wake anyone in get_client now that the failure is
+                        // recorded. Success is not the only news worth waking
+                        // for: without this a caller sleeps until the next
+                        // attempt succeeds, which is exactly the wait that
+                        // `surface_connect_errors` exists to cut short. The
+                        // value stays None, so a waiter that does not want the
+                        // error simply goes back to waiting.
+                        let _ = client_opts.on_client_connected_tx.send(None);
                     }
                 }
             }
@@ -472,6 +517,7 @@ impl<K: KvClient + KvClientOps + 'static> KvClientBabysitter for StdKvClientBaby
             id: opts.id.clone(),
             endpoint_id: opts.endpoint_id.clone(),
             on_demand_connect: opts.on_demand_connect,
+            surface_connect_errors: opts.surface_connect_errors,
             connect_throttle_period: opts.connect_throttle_period,
             state_change_handler: opts.state_change_handler,
             on_client_connected_tx,
@@ -566,6 +612,31 @@ impl<K: KvClient + KvClientOps + 'static> KvClientBabysitter for StdKvClientBaby
         }
 
         loop {
+            // A connect that has already failed is worth answering with. Waiting
+            // is the right move while a connection is on its way back, but it
+            // cannot tell that apart from a password the server will keep
+            // refusing -- and that wait has no bound in this crate. When the
+            // embedder asks, hand over the reason the last attempt failed and let
+            // the caller decide, which is what gocbcorex does.
+            //
+            // Read before waiting, so a stale failure answers immediately rather
+            // than after whatever the reconnect in flight does next. The lock is
+            // released before the select: it is held by the connect thread too.
+            if self.surface_connect_errors {
+                let connect_err = {
+                    let guard = self.slow_state.lock().unwrap();
+                    guard.connect_err.as_ref().map(|e| e.connect_error.clone())
+                };
+
+                if let Some(err) = connect_err {
+                    debug!(
+                        "Client babysitter {} answering with stored connect error: {}",
+                        &self.id, &err
+                    );
+                    return Err(err);
+                }
+            }
+
             let changed = select! {
                 () = self.shutdown_token.cancelled() => {
                     return Err(Error::new_message_error("client babysitter shutdown"))
@@ -619,6 +690,10 @@ impl<K: KvClient + KvClientOps + 'static> KvClientBabysitter for StdKvClientBaby
             last_activity,
             namespace: state.desired_config.selected_bucket.clone(),
             state: connection_state,
+            last_connect_error: state
+                .connect_err
+                .as_ref()
+                .map(|e| e.connect_error.to_string()),
         }
     }
 
@@ -684,7 +759,11 @@ impl<K: KvClient + KvClientOps + 'static> KvClientBabysitter for StdKvClientBaby
             client.close().await?;
         }
 
-        self.state_change_handler.send((self.id.clone(), None));
+        self.state_change_handler.send(KvClientStateChange {
+            babysitter_id: self.id.clone(),
+            client: None,
+            connect_err: None,
+        });
 
         Ok(())
     }
@@ -694,5 +773,139 @@ impl<K: KvClient> Drop for StdKvClientBabysitter<K> {
     fn drop(&mut self) {
         self.shutdown_token.cancel();
         info!("Dropping StdKvClientBabysitter {}", self.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::address::Address;
+    use crate::authenticator::PasswordAuthenticator;
+    use crate::kvclient::{KvClientBootstrapOptions, StdKvClient};
+    use crate::memdx::client::Client;
+    use crate::tracingcomponent::TracingComponentConfig;
+    use tokio::sync::mpsc::UnboundedReceiver;
+    use tokio::time::timeout;
+
+    type TestClient = StdKvClient<Client>;
+
+    /// A port nothing listens on, so every connect attempt fails, and fails fast.
+    ///
+    /// Taken by binding and releasing rather than picked, because a hardcoded
+    /// port that something else happens to hold would make this pass for the
+    /// wrong reason.
+    async fn closed_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    async fn babysitter_for(
+        surface_connect_errors: bool,
+    ) -> (
+        StdKvClientBabysitter<TestClient>,
+        UnboundedReceiver<KvClientStateChange<TestClient>>,
+    ) {
+        let address = Address {
+            host: "127.0.0.1".to_string(),
+            port: closed_port().await,
+        };
+
+        // Held and handed back: dropping the receiver would only lose a state
+        // change this test never reads, but keeping it is closer to the real
+        // arrangement.
+        let (state_change_handler, state_change_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let babysitter = KvClientBabysitter::new(KvClientBabysitterOptions {
+            id: "test-babysitter".to_string(),
+            // On demand, so that get_client is what drives the connect attempt.
+            on_demand_connect: true,
+            surface_connect_errors,
+            connect_throttle_period: Duration::from_millis(50),
+            disable_decompression: false,
+            bootstrap_opts: KvClientBootstrapOptions {
+                client_name: "test".to_string(),
+                disable_error_map: false,
+                disable_mutation_tokens: false,
+                disable_server_durations: false,
+                on_err_map_fetched: None,
+                tcp_keep_alive_time: Duration::from_secs(60),
+                auth_mechanisms: vec![],
+                connect_timeout: Duration::from_millis(500),
+            },
+            endpoint_id: "test-endpoint".to_string(),
+            state_change_handler,
+            unsolicited_packet_tx: None,
+            orphan_handler: None,
+            target: KvTarget {
+                address: address.clone(),
+                canonical_address: address,
+                tls_config: None,
+            },
+            auth: Authenticator::PasswordAuthenticator(PasswordAuthenticator {
+                username: "user".to_string(),
+                password: "pass".to_string(),
+            }),
+            selected_bucket: None,
+            tracing: Arc::new(TracingComponent::new(TracingComponentConfig {
+                cluster_labels: None,
+            })),
+        });
+
+        (babysitter, state_change_rx)
+    }
+
+    #[tokio::test]
+    async fn surfaced_connect_errors_answer_the_caller() {
+        let (babysitter, _state_change_rx) = babysitter_for(true).await;
+
+        let res = timeout(Duration::from_secs(5), babysitter.get_client())
+            .await
+            .expect("get_client should answer with the connect error, not wait for a reconnect");
+
+        assert!(
+            res.is_err(),
+            "connecting to a closed port cannot have succeeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostics_carry_the_last_connect_error() {
+        // Built with the option off, to show that reporting the cause does not
+        // depend on it: an operation still waits, a support ticket still says why.
+        let (babysitter, _state_change_rx) = babysitter_for(false).await;
+
+        assert!(
+            babysitter
+                .endpoint_diagnostics()
+                .last_connect_error
+                .is_none(),
+            "nothing has been attempted yet, so there is nothing to report"
+        );
+
+        // Drives an attempt that cannot succeed. Waiting is what the default
+        // does, so let the wait time out rather than expecting an answer.
+        let _ = timeout(Duration::from_millis(600), babysitter.get_client()).await;
+
+        assert!(
+            babysitter
+                .endpoint_diagnostics()
+                .last_connect_error
+                .is_some(),
+            "a failed attempt should be reported against the endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_default_waits_for_a_connection() {
+        let (babysitter, _state_change_rx) = babysitter_for(false).await;
+
+        let res = timeout(Duration::from_millis(600), babysitter.get_client()).await;
+
+        assert!(
+            res.is_err(),
+            "the default must keep waiting for a connection rather than answering with the connect error"
+        );
     }
 }

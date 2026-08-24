@@ -275,6 +275,21 @@ impl Default for ConfigPollerConfig {
 #[non_exhaustive]
 pub struct KvConfig {
     pub on_demand_connect: bool,
+
+    /// Whether an operation that cannot get a connection fails with the error
+    /// from the last connect attempt instead of waiting for a reconnect.
+    ///
+    /// Off by default, which leaves an operation waiting until a connection is
+    /// established. That is the right answer when a connection is merely slow to
+    /// come back, but it makes a permanent failure -- a wrong password, a
+    /// rejected certificate -- indistinguishable from a slow one: the cause goes
+    /// to the log and the caller keeps waiting, with nothing in this crate
+    /// bounding the wait.
+    ///
+    /// Turning it on hands that stored error to the caller instead, which is what
+    /// gocbcorex does. A *first* connect still waits, because until an attempt
+    /// has failed there is no error to report.
+    pub surface_connect_errors: bool,
     pub enable_error_map: bool,
     pub enable_mutation_tokens: bool,
     pub enable_server_durations: bool,
@@ -307,6 +322,11 @@ impl KvConfig {
 
     pub fn on_demand_connect(mut self, on_demand_connect: bool) -> Self {
         self.on_demand_connect = on_demand_connect;
+        self
+    }
+
+    pub fn surface_connect_errors(mut self, enable: bool) -> Self {
+        self.surface_connect_errors = enable;
         self
     }
 
@@ -350,6 +370,7 @@ impl Default for KvConfig {
     fn default() -> Self {
         Self {
             on_demand_connect: false,
+            surface_connect_errors: false,
             enable_error_map: true,
             enable_mutation_tokens: true,
             enable_server_durations: true,
