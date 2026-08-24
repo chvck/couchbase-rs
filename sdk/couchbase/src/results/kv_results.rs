@@ -91,7 +91,9 @@ impl GetResult {
 impl From<couchbase_core::results::kv::GetResult> for GetResult {
     fn from(result: couchbase_core::results::kv::GetResult) -> Self {
         Self {
-            content: result.value,
+            // `couchbase-core` hands back a view into the response frame; this
+            // type owns its content, so the copy happens here rather than there.
+            content: result.value.to_vec(),
             flags: result.flags,
             cas: result.cas,
             expiry_time: None,
@@ -102,7 +104,9 @@ impl From<couchbase_core::results::kv::GetResult> for GetResult {
 impl From<couchbase_core::results::kv::GetAndTouchResult> for GetResult {
     fn from(result: couchbase_core::results::kv::GetAndTouchResult) -> Self {
         Self {
-            content: result.value,
+            // `couchbase-core` hands back a view into the response frame; this
+            // type owns its content, so the copy happens here rather than there.
+            content: result.value.to_vec(),
             flags: result.flags,
             cas: result.cas,
             expiry_time: None,
@@ -113,7 +117,9 @@ impl From<couchbase_core::results::kv::GetAndTouchResult> for GetResult {
 impl From<couchbase_core::results::kv::GetAndLockResult> for GetResult {
     fn from(result: couchbase_core::results::kv::GetAndLockResult) -> Self {
         Self {
-            content: result.value,
+            // `couchbase-core` hands back a view into the response frame; this
+            // type owns its content, so the copy happens here rather than there.
+            content: result.value.to_vec(),
             flags: result.flags,
             cas: result.cas,
             expiry_time: None,

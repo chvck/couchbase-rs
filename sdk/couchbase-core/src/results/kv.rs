@@ -23,7 +23,12 @@ use std::time::Duration;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct GetResult {
-    pub value: Vec<u8>,
+    /// A view into the response frame's own buffer, not a copy of it.
+    ///
+    /// The frame is reference-counted rather than copied out, so a caller
+    /// that holds one body long after the rest of its batch keeps that whole
+    /// read buffer alive; such a caller should copy it out.
+    pub value: Bytes,
     pub flags: u32,
     pub datatype: u8,
     pub cas: u64,
@@ -33,7 +38,8 @@ pub struct GetResult {
 pub struct GetMetaResult {
     pub cas: u64,
     pub flags: u32,
-    pub value: Vec<u8>,
+    /// A view into the response frame's own buffer, not a copy of it.
+    pub value: Bytes,
     pub datatype: u8,
     pub server_duration: Option<Duration>,
     pub expiry: u32,
@@ -55,7 +61,8 @@ pub struct DeleteResult {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct GetAndLockResult {
-    pub value: Vec<u8>,
+    /// A view into the response frame's own buffer, not a copy of it.
+    pub value: Bytes,
     pub flags: u32,
     pub datatype: u8,
     pub cas: u64,
@@ -63,7 +70,8 @@ pub struct GetAndLockResult {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct GetAndTouchResult {
-    pub value: Vec<u8>,
+    /// A view into the response frame's own buffer, not a copy of it.
+    pub value: Bytes,
     pub flags: u32,
     pub datatype: u8,
     pub cas: u64,

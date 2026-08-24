@@ -213,7 +213,7 @@ impl<
                         Error::new_contextual_memdx_error(e)
                     })
                     .map_ok(|resp| GetResult {
-                        value: resp.value.to_vec(),
+                        value: resp.value,
                         datatype: resp.datatype,
                         cas: resp.cas,
                         flags: resp.flags,
@@ -251,7 +251,7 @@ impl<
                         Error::new_contextual_memdx_error(e)
                     })
                     .map_ok(|resp| GetMetaResult {
-                        value: resp.value.to_vec(),
+                        value: resp.value,
                         datatype: resp.datatype,
                         server_duration: resp.server_duration,
                         expiry: resp.expiry,
@@ -341,7 +341,7 @@ impl<
                         Error::new_contextual_memdx_error(e)
                     })
                     .map_ok(|resp| GetAndLockResult {
-                        value: resp.value.to_vec(),
+                        value: resp.value,
                         datatype: resp.datatype,
                         cas: resp.cas,
                         flags: resp.flags,
@@ -380,7 +380,7 @@ impl<
                         Error::new_contextual_memdx_error(e)
                     })
                     .map_ok(|resp| GetAndTouchResult {
-                        value: resp.value.to_vec(),
+                        value: resp.value,
                         datatype: resp.datatype,
                         cas: resp.cas,
                         flags: resp.flags,
