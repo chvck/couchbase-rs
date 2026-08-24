@@ -87,7 +87,7 @@ async fn a_scan_yields_every_entry_in_order_across_batches() {
     let (client, _server) = connect(script).await;
 
     let mut stream = client
-        .scan(&ScanOptions::new(7, "req-1"))
+        .scan(ScanOptions::new(7, "req-1"))
         .await
         .expect("scan");
 
@@ -111,7 +111,7 @@ async fn entry_keys_survive_the_round_trip() {
     let (client, _server) = connect(script).await;
 
     let mut stream = client
-        .scan(&ScanOptions::new(7, "req-1"))
+        .scan(ScanOptions::new(7, "req-1"))
         .await
         .expect("scan");
     let entry = stream.next().await.expect("an entry").expect("no error");
@@ -140,7 +140,7 @@ async fn abandoning_a_scan_stops_the_server_and_recovers_the_connection() {
     let (client, server) = connect(script).await;
 
     let mut stream = client
-        .scan(&ScanOptions::new(7, "req-1"))
+        .scan(ScanOptions::new(7, "req-1"))
         .await
         .expect("scan");
     let first = stream.next().await.expect("an entry").expect("no error");
@@ -180,7 +180,7 @@ async fn an_indexer_error_ends_the_scan_but_not_the_connection() {
     let (client, _server) = connect(script).await;
 
     let mut stream = client
-        .scan(&ScanOptions::new(7, "req-1"))
+        .scan(ScanOptions::new(7, "req-1"))
         .await
         .expect("scan");
 
@@ -229,7 +229,7 @@ async fn a_truncated_stream_is_an_error_and_not_an_end() {
     let (client, _server) = connect(script).await;
 
     let mut stream = client
-        .scan(&ScanOptions::new(7, "req-1"))
+        .scan(ScanOptions::new(7, "req-1"))
         .await
         .expect("scan");
     stream.next().await.expect("an entry").expect("no error");
@@ -256,7 +256,7 @@ async fn an_old_servers_end_frame_still_ends_the_stream() {
     let (client, _server) = connect(script).await;
 
     let mut stream = client
-        .scan(&ScanOptions::new(7, "req-1"))
+        .scan(ScanOptions::new(7, "req-1"))
         .await
         .expect("scan");
     stream.next().await.expect("an entry").expect("no error");
@@ -289,7 +289,7 @@ async fn the_scan_request_says_what_the_options_asked_for() {
         Scan::equals(vec![b"1".to_vec(), b"2".to_vec()]),
     ];
 
-    let stream = client.scan(&opts).await.expect("scan");
+    let stream = client.scan(opts).await.expect("scan");
     stream.finish().await.expect("finish");
 
     let payload = server
@@ -346,7 +346,7 @@ async fn an_unbounded_end_is_omitted_rather_than_sent_as_a_sentinel() {
         inclusion: Inclusion::Low,
     }])];
 
-    let stream = client.scan(&opts).await.expect("scan");
+    let stream = client.scan(opts).await.expect("scan");
     stream.finish().await.expect("finish");
 
     let payload = server
@@ -453,7 +453,7 @@ mod tls {
         assert_eq!(client.server_version(), 11, "Helo came back over TLS");
 
         let mut stream = client
-            .scan(&ScanOptions::new(7, "tls-req"))
+            .scan(ScanOptions::new(7, "tls-req"))
             .await
             .expect("scan");
         let mut keys = Vec::new();

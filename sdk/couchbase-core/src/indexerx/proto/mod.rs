@@ -473,8 +473,14 @@ impl Request {
         Request::wrap(|p| p.end_stream = Some(wire::EndStreamRequest {}))
     }
 
-    pub(crate) fn scan(opts: &ScanOptions) -> Request {
-        Request::wrap(|p| {
+    /// **Takes the options by value**, because a `ScanOptions` is built for one
+    /// request and dropped with it. Borrowing meant every owned field — the
+    /// request id, the spans and their bounds, the projection, the partition
+    /// list, the user — was cloned on the way into the wire structs, one layer
+    /// after `indexcomponent` had already cloned them to build this. Moving
+    /// costs nothing and the caller had no use for them afterwards.
+    pub(crate) fn scan(opts: ScanOptions) -> Request {
+        Request::wrap(move |p| {
             p.scan_request = Some(wire::ScanRequest {
                 defn_id: opts.defn_id,
                 // Required by the schema, and empty because the real bounds
@@ -490,17 +496,17 @@ impl Request {
                     Consistency::Query(v) => Some(v.as_wire()),
                     _ => None,
                 },
-                request_id: Some(opts.request_id.clone()),
-                scans: opts.scans.iter().map(scan_to_wire).collect(),
-                indexprojection: opts.projection.as_ref().map(|p| wire::IndexProjection {
-                    entry_keys: p.entry_keys.clone(),
+                request_id: Some(opts.request_id),
+                scans: opts.scans.into_iter().map(scan_to_wire).collect(),
+                indexprojection: opts.projection.map(|p| wire::IndexProjection {
+                    entry_keys: p.entry_keys,
                     primary_key: Some(p.primary_key),
                 }),
                 offset: Some(opts.offset),
-                partition_ids: opts.partitions.clone(),
+                partition_ids: opts.partitions,
                 sorted: Some(true),
                 data_enc_fmt: Some(opts.data_encoding.as_wire()),
-                user: opts.user.clone(),
+                user: opts.user,
                 req_timeout: opts
                     .timeout
                     .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
@@ -513,26 +519,52 @@ impl Request {
         })
     }
 
+    /// The encoded size, for the frame's length prefix.
+    ///
+    /// One traversal of the message, which a length-prefixed frame cannot avoid
+    /// — but it writes nothing, so it is not the "encode to a scratch buffer to
+    /// learn the length" pass it might look like.
+    pub(crate) fn encoded_len(&self) -> usize {
+        prost::Message::encoded_len(&self.0)
+    }
+
+    /// Encode into a buffer the caller has already reserved room in.
+    ///
+    /// `encode_raw` rather than `encode` because there is nothing to report: the
+    /// only way prost's `encode` fails is a buffer too small for
+    /// [`encoded_len`](Self::encoded_len), which the caller has just reserved.
+    /// This is what `encode_to_vec` does with a `Vec`; the point of doing it
+    /// here is that the buffer is the socket's, so the encoded bytes are written
+    /// once instead of being built in a `Vec` and copied in.
+    pub(crate) fn encode_into(&self, dst: &mut impl bytes::BufMut) {
+        prost::Message::encode_raw(&self.0, dst);
+    }
+
+    /// The encoded request, as its own allocation.
+    ///
+    /// Only for tests that assert what went on the wire — the send path encodes
+    /// through [`encode_into`](Self::encode_into) and never builds this.
+    #[cfg(test)]
     pub(crate) fn encode(self) -> Vec<u8> {
         self.0.encode_to_vec()
     }
 }
 
-fn scan_to_wire(scan: &Scan) -> wire::Scan {
+fn scan_to_wire(scan: Scan) -> wire::Scan {
     // `equals` wins over `filters` at the indexer, which reads it first and
     // ignores the rest. `Scan`'s constructors keep them mutually exclusive, so
     // this only has to preserve that rather than arbitrate it.
     wire::Scan {
         filters: scan
             .filters
-            .iter()
+            .into_iter()
             .map(|f| wire::CompositeElementFilter {
-                low: f.low.clone(),
-                high: f.high.clone(),
+                low: f.low,
+                high: f.high,
                 inclusion: f.inclusion.as_wire(),
             })
             .collect(),
-        equals: scan.equals.clone(),
+        equals: scan.equals,
     }
 }
 

@@ -591,7 +591,7 @@ impl Lease {
     /// [`restore`](Lease::restore) when whoever owns the stream is finished with
     /// it. Meanwhile the lease keeps the slot open on the stream's behalf, which
     /// is what stops the cap being a lie for as long as scans are running.
-    pub async fn start_scan(&mut self, opts: &ScanOptions) -> Result<ScanStream, Error> {
+    pub async fn start_scan(&mut self, opts: ScanOptions) -> Result<ScanStream, Error> {
         let client = self.client.take().expect("a lease always holds a client");
 
         // A request that could not be sent leaves no stream to own the

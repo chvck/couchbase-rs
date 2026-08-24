@@ -281,7 +281,7 @@ impl<C: Client + 'static> IndexComponent<C> {
             let pool = self.pool_for(&route.scan_address)?;
             let mut lease = pool.acquire().await?;
             let stream = lease
-                .start_scan(&scan_options(route, opts, consistency, request_id))
+                .start_scan(scan_options(route, opts, consistency, request_id))
                 .await
                 .map_err(ErrorKind::Indexer)?;
 

@@ -352,7 +352,7 @@ mod tests {
 
         let mut lease = pool.acquire().await.expect("a connection");
         let stream = lease
-            .start_scan(&ScanOptions::new(7, "req-1"))
+            .start_scan(ScanOptions::new(7, "req-1"))
             .await
             .expect("a scan");
 

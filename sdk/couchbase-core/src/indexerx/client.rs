@@ -53,10 +53,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::BytesMut;
 use futures::{SinkExt, Stream, StreamExt};
 use tokio::time::Instant;
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Framed, FramedParts};
 
 use crate::address::Address;
 // The transport, and only the transport. `indexerx` is a peer of `memdx` and
@@ -93,6 +93,34 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Matches the agent's default. A scan connection sits idle in a pool between
 /// scans exactly as a KV one does, so it wants the same keepalive.
 const DEFAULT_TCP_KEEP_ALIVE_TIME: Duration = Duration::from_secs(60);
+
+/// The read buffer a scan connection starts with, and **64 KiB exactly.**
+///
+/// `Framed::new`'s 8 KiB reallocates on nearly every packet, for a reason that
+/// is not visible from here. A decoded row is a `Bytes` view into this buffer
+/// (`IndexEntry` is generated with `bytes = "bytes"`), so the buffer stays
+/// shared for as long as any row of the last packet is alive — which, mid-scan,
+/// is always. `BytesMut::reserve` on a shared buffer cannot grow in place: it
+/// allocates a fresh one, copies the partial frame across, and reverts the
+/// buffer to unshared, so the next `split_to` allocates its control block
+/// again. One packet, two allocations and a copy. Holding several packets'
+/// worth turns that into once per buffer-full, and lets each `read` drain the
+/// socket rather than stopping at whatever the last split left over.
+///
+/// **64 KiB and not more**, which is the part worth writing down: `bytes`
+/// remembers a buffer's original capacity in a 3-bit field
+/// (`ORIGINAL_CAPACITY_MASK`), and `original_capacity_to_repr` clamps it to 7,
+/// which reads back as `1 << 16`. Ask for 256 KiB and the first shared
+/// reallocation hands back 64 — after paying to copy 256.
+///
+/// **The read half only**, which is why this goes in through `FramedParts`
+/// rather than `Framed::with_capacity`: that constructor sizes the write buffer
+/// and the backpressure boundary to the same number, and requests here are a
+/// few hundred bytes that `send` flushes immediately. It would buy nothing and
+/// cost a second 64 KiB allocation on every dial — on the very path this is
+/// meant to make cheaper. An empty `write_buf` is floored back to
+/// `tokio_util`'s own 8 KiB default by `WriteFrame::from`.
+const READ_BUFFER_CAPACITY: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
@@ -173,8 +201,14 @@ impl Client {
             ),
         };
 
+        let mut parts = FramedParts::new::<Request>(
+            connection.into_inner(),
+            PacketCodec::new(opts.max_payload),
+        );
+        parts.read_buf = BytesMut::with_capacity(READ_BUFFER_CAPACITY);
+
         let mut client = Client {
-            framed: Framed::new(connection.into_inner(), PacketCodec::new(opts.max_payload)),
+            framed: Framed::from_parts(parts),
             server_version: 0,
         };
 
@@ -256,7 +290,7 @@ impl Client {
     /// The connection comes back from [`ScanStream::finish`], and only after
     /// the stream has been drained — see [`super::scan`] for why that is
     /// enforced by ownership rather than by a rule.
-    pub async fn scan(mut self, opts: &ScanOptions) -> Result<ScanStream, Error> {
+    pub async fn scan(mut self, opts: ScanOptions) -> Result<ScanStream, Error> {
         // If the request cannot even be sent there is no stream to own the
         // connection, so the client is dropped here along with it.
         self.send(Request::scan(opts)).await?;
@@ -333,10 +367,12 @@ impl Client {
         self.send(Request::end_stream()).await
     }
 
+    /// Send one request, encoded directly into the socket's write buffer.
+    ///
+    /// See [`PacketCodec`]'s `Encoder<Request>`: the `Frame::Payload` route
+    /// would build the encoded body in a `Vec` and copy it in again.
     async fn send(&mut self, request: Request) -> Result<(), Error> {
-        self.framed
-            .send(Frame::Payload(Bytes::from(request.encode())))
-            .await?;
+        self.framed.send(request).await?;
         Ok(())
     }
 

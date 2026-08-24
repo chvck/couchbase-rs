@@ -46,6 +46,8 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
+use super::proto::Request;
+
 /// Payload encoding, from bits 4-7 of the flags.
 ///
 /// Protobuf is the only value the server accepts and the only one we send. It
@@ -163,6 +165,9 @@ fn checksum(len_be: [u8; 4]) -> u8 {
     ck & 0x7F
 }
 
+/// The granularity the decoder rounds a growth request up to.
+const READ_CHUNK: usize = 16 * 1024;
+
 pub struct PacketCodec {
     max_payload: usize,
 }
@@ -234,7 +239,18 @@ impl Decoder for PacketCodec {
         }
 
         if src.len() < HEADER_LEN + payload_len {
-            src.reserve(HEADER_LEN + payload_len - src.len());
+            // **Rounded up, because an exact request buys a buffer with no
+            // spare.** While rows of the previous packet are still alive the
+            // buffer is shared, and `reserve` on a shared buffer allocates
+            // exactly `len + additional` — so asking for the precise shortfall
+            // of a payload larger than the buffer's original capacity produces a
+            // buffer that is full the moment the frame lands, and the next frame
+            // reallocates again. `bytes` already rounds anything up to that
+            // original capacity for us (64 KiB, see
+            // `client::READ_BUFFER_CAPACITY`); this covers the payloads above
+            // it, which is the only case it cannot.
+            let shortfall = HEADER_LEN + payload_len - src.len();
+            src.reserve(shortfall.next_multiple_of(READ_CHUNK));
             return Ok(None);
         }
 
@@ -278,9 +294,74 @@ impl Encoder<Frame> for PacketCodec {
     }
 }
 
+/// Encode a request straight into the socket's write buffer.
+///
+/// **The whole reason this exists beside `Encoder<Frame>`.** Going through
+/// `Frame::Payload` means encoding the protobuf into a `Vec`, wrapping it in
+/// `Bytes`, and then copying the whole thing again into the buffer below — one
+/// allocation and one full-payload copy per request, for bytes that are about to
+/// be written and dropped. Here the length prefix comes from
+/// [`Request::encoded_len`] and the body is encoded once, in place.
+///
+/// `Encoder<Frame>` stays: it is what the round-trip tests assert against, and
+/// it is the only thing that can write a terminator.
+impl Encoder<Request> for PacketCodec {
+    type Error = CodecError;
+
+    fn encode(&mut self, item: Request, dst: &mut BytesMut) -> Result<(), CodecError> {
+        let payload_len = item.encoded_len();
+        if payload_len > self.max_payload {
+            return Err(ProtocolError::PayloadTooLong {
+                len: payload_len,
+                max: self.max_payload,
+            }
+            .into());
+        }
+
+        let len_be = (payload_len as u32).to_be_bytes();
+        let flags = ENCODING_PROTOBUF as u16 | ((checksum(len_be) as u16) << CHECKSUM_SHIFT);
+
+        dst.reserve(HEADER_LEN + payload_len);
+        dst.put_slice(&len_be);
+        dst.put_u16(flags);
+        item.encode_into(dst);
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::proto::Consistency;
     use super::*;
+
+    /// **The invariant `Encoder<Request>` has to hold**, and the reason it can be
+    /// trusted to replace the two-step path: same header, same checksum, same
+    /// body, byte for byte. Two payload sizes, because the length prefix is the
+    /// part that varies and a one-byte body would not exercise it.
+    #[test]
+    fn a_request_encodes_to_the_same_frame_as_its_payload_would() {
+        for (name, direct, staged) in [
+            ("helo", Request::helo(), Request::helo()),
+            (
+                "count",
+                Request::count_all(8891, Consistency::Session, vec![0]),
+                Request::count_all(8891, Consistency::Session, vec![0]),
+            ),
+        ] {
+            let mut codec = PacketCodec::default();
+
+            let mut written = BytesMut::new();
+            codec.encode(direct, &mut written).expect("encode request");
+
+            let mut copied = BytesMut::new();
+            codec
+                .encode(Frame::Payload(Bytes::from(staged.encode())), &mut copied)
+                .expect("encode frame");
+
+            assert_eq!(written, copied, "{name} framed differently");
+        }
+    }
 
     fn roundtrip(frame: Frame) -> Frame {
         let mut codec = PacketCodec::default();
